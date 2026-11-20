@@ -553,50 +553,77 @@ def clean_dashboard():
         <title>CastilloEnfoca - Organizador Oficial</title>
         <style>
             * { box-sizing: border-box; margin: 0; padding: 0; }
-            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #09090b; color: #ffffff; padding: 16px; }
-            .container { max-width: 520px; margin: 0 auto; }
+            body { 
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; 
+                background-color: #0b0504; 
+                background-image: 
+                    radial-gradient(circle at 85% 15%, #2a0f08 0%, transparent 55%), 
+                    radial-gradient(circle at 10% 85%, #1e0a05 0%, transparent 50%), 
+                    radial-gradient(rgba(234, 88, 12, 0.14) 1.2px, transparent 1.2px); 
+                background-size: 100% 100%, 100% 100%, 28px 28px; 
+                background-attachment: fixed; 
+                color: #ffffff; 
+                padding: 16px; 
+                position: relative;
+                min-height: 100vh;
+            }
+            .watermark-01 {
+                position: fixed;
+                top: 5px;
+                right: 25px;
+                font-size: 140px;
+                font-weight: 900;
+                color: transparent;
+                -webkit-text-stroke: 1.5px rgba(234, 88, 12, 0.14);
+                pointer-events: none;
+                z-index: 0;
+                letter-spacing: -6px;
+                font-family: monospace, sans-serif;
+            }
+            .container { max-width: 520px; margin: 0 auto; position: relative; z-index: 1; }
             
             .header { text-align: center; margin-bottom: 24px; padding-top: 10px; }
-            .logo-img { width: 110px; height: 110px; border-radius: 50%; margin: 0 auto 12px auto; display: block; box-shadow: 0 0 25px rgba(239, 68, 68, 0.45); border: 2px solid #ef4444; }
+            .logo-img { width: 110px; height: 110px; border-radius: 50%; margin: 0 auto 12px auto; display: block; box-shadow: 0 0 28px rgba(234, 88, 12, 0.5); border: 2px solid #ea580c; }
             .header h1 { font-size: 26px; font-weight: 900; letter-spacing: 1px; margin-bottom: 2px; }
             .brand-white { color: #ffffff; }
-            .brand-red { color: #ef4444; }
-            .header p { color: #a1a1aa; font-size: 14px; }
+            .brand-red { color: #f97316; }
+            .header p { color: #a89f91; font-size: 14px; }
 
-            .card { background: #141416; border-radius: 18px; padding: 22px; margin-bottom: 16px; border: 1px solid #27272a; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
+            .card { background: #150a07; border-radius: 18px; padding: 22px; margin-bottom: 16px; border: 1px solid #36170e; box-shadow: 0 10px 32px rgba(0,0,0,0.65), inset 0 1px 0 rgba(234, 88, 12, 0.12); }
             
-            .upload-box { border: 2px dashed #f97316; border-radius: 14px; padding: 34px 18px; text-align: center; cursor: pointer; background: #18181b; transition: 0.2s; }
-            .upload-box:active { background: #27272a; border-color: #ef4444; }
+            .upload-box { border: 2px dashed #ea580c; border-radius: 14px; padding: 34px 18px; text-align: center; cursor: pointer; background: #1c0e09; transition: 0.2s; box-shadow: inset 0 0 20px rgba(234, 88, 12, 0.05); }
+            .upload-box:active { background: #2a140d; border-color: #f97316; }
             .upload-icon { font-size: 46px; margin-bottom: 8px; }
             .upload-text { font-size: 17px; font-weight: bold; color: #ffffff; }
-            .upload-hint { font-size: 13px; color: #a1a1aa; margin-top: 4px; }
+            .upload-hint { font-size: 13px; color: #a89f91; margin-top: 4px; }
             
             input[type="file"] { display: none; }
             
-            .btn-action { width: 100%; background: linear-gradient(135deg, #e11d48 0%, #ea580c 100%); color: white; border: none; padding: 18px; border-radius: 14px; font-size: 18px; font-weight: 900; cursor: pointer; margin-top: 16px; display: none; box-shadow: 0 4px 15px rgba(225, 29, 72, 0.4); text-transform: uppercase; }
+            .btn-action { width: 100%; background: linear-gradient(135deg, #ea580c 0%, #c2410c 100%); color: white; border: none; padding: 18px; border-radius: 14px; font-size: 18px; font-weight: 900; cursor: pointer; margin-top: 16px; display: none; box-shadow: 0 4px 20px rgba(234, 88, 12, 0.45); text-transform: uppercase; }
             .btn-action:active { transform: scale(0.98); }
-            .btn-action:disabled { background: #3f3f46; box-shadow: none; }
+            .btn-action:disabled { background: #2d1810; box-shadow: none; color: #786558; }
 
             .btn-download { width: 100%; background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: white; border: none; padding: 18px; border-radius: 14px; font-size: 18px; font-weight: 900; cursor: pointer; margin-top: 14px; text-align: center; text-decoration: none; display: none; box-shadow: 0 4px 20px rgba(16, 185, 129, 0.45); text-transform: uppercase; letter-spacing: 0.5px; transition: transform 0.15s, box-shadow 0.15s; }
             .btn-download:active { transform: scale(0.98); }
             
-            .btn-clean { width: 100%; background: transparent; color: #a1a1aa; border: 1px solid #27272a; padding: 12px; border-radius: 12px; font-size: 13px; cursor: pointer; margin-top: 12px; text-align: center; }
-            .btn-clean:hover { color: #f43f5e; border-color: #f43f5e; }
+            .btn-clean { width: 100%; background: transparent; color: #a89f91; border: 1px solid #36170e; padding: 12px; border-radius: 12px; font-size: 13px; cursor: pointer; margin-top: 12px; text-align: center; }
+            .btn-clean:hover { color: #f97316; border-color: #ea580c; }
 
-            .status-box { background: #09090b; border-radius: 10px; padding: 14px; font-family: monospace; font-size: 13px; color: #f97316; text-align: center; border: 1px solid #27272a; }
+            .status-box { background: #0e0604; border-radius: 10px; padding: 14px; font-family: monospace; font-size: 13px; color: #f97316; text-align: center; border: 1px solid #36170e; }
             
-            .folder-item { background: #18181b; border: 1px solid #27272a; border-radius: 12px; padding: 14px 16px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
+            .folder-item { background: #1a0d09; border: 1px solid #36170e; border-radius: 12px; padding: 14px 16px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
             .folder-name { font-weight: bold; font-size: 15px; color: #ffffff; }
-            .folder-count { background: linear-gradient(135deg, #ef4444 0%, #f97316 100%); padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: bold; }
+            .folder-count { background: linear-gradient(135deg, #ea580c 0%, #c2410c 100%); padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: bold; color: #ffffff; }
 
-            .vault-card { background: #111114; border: 1px solid #27272a; border-radius: 14px; padding: 18px; margin-top: 18px; text-align: center; }
-            .vault-title { font-size: 15px; font-weight: bold; color: #facc15; margin-bottom: 6px; display: flex; align-items: center; justify-content: center; gap: 8px; }
-            .vault-desc { font-size: 13px; color: #a1a1aa; margin-bottom: 12px; line-height: 1.4; }
-            .btn-vault { background: #1c1917; color: #facc15; border: 1px solid #78350f; padding: 12px 20px; border-radius: 10px; font-size: 14px; font-weight: bold; text-decoration: none; display: inline-block; cursor: pointer; transition: 0.2s; }
-            .btn-vault:hover { background: #292524; border-color: #facc15; }
+            .vault-card { background: #140805; border: 1px solid #36170e; border-radius: 14px; padding: 18px; margin-top: 18px; text-align: center; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
+            .vault-title { font-size: 15px; font-weight: bold; color: #fb923c; margin-bottom: 6px; display: flex; align-items: center; justify-content: center; gap: 8px; }
+            .vault-desc { font-size: 13px; color: #a89f91; margin-bottom: 12px; line-height: 1.4; }
+            .btn-vault { background: #240f08; color: #fb923c; border: 1px solid #7c2d12; padding: 12px 20px; border-radius: 10px; font-size: 14px; font-weight: bold; text-decoration: none; display: inline-block; cursor: pointer; transition: 0.2s; }
+            .btn-vault:hover { background: #36150b; border-color: #f97316; }
         </style>
     </head>
     <body>
+        <div class="watermark-01">01</div>
         <div class="container">
             <div class="header">
                 <img src="/logo.png" alt="CastilloEnfoca" class="logo-img" onerror="this.style.display='none'">
