@@ -32,13 +32,13 @@ R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY", "")
 R2_ENDPOINT_URL = os.getenv("R2_ENDPOINT_URL", "")
 R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", "agente-1-clasificador-fotos")
 
-# Nómina oficial del partido: ÚNICA DISTINCIÓN (Dorsal -> Nombre del Jugador)
-roster_map = {
-    "1": "Portero_Trujillo",
-    "4": "Defensa_4",
-    "7": "Extremo_7",
-    "10": "Delantero_10"
+# Nómina de nombres conocidos del partido (si no tiene nombre impreso, se usa únicamente el dorsal)
+player_names = {
+    "1": "Trujillo"
 }
+
+# Dorsales válidos del partido para descartar lecturas espurias de arrugas
+valid_dorsals = {"1", "4", "7", "10", "11", "9"}
 
 def get_r2_client():
     if not R2_ACCESS_KEY_ID or not R2_SECRET_ACCESS_KEY or not R2_ENDPOINT_URL:
@@ -123,13 +123,28 @@ def detect_dorsal_and_face(img_bytes: bytes) -> Dict[str, Any]:
                     txt = pytesseract.image_to_string(t_img, config=cfg).strip()
                     nums = re.findall(r'\b([1-9][0-9]?)\b', txt)
                     for n in nums:
-                        if n in roster_map:  # Validar estrictamente contra los dorsales del partido
+                        if n in valid_dorsals:  # Validar estrictamente contra los dorsales del partido
                             detected_dorsal = str(int(n))
                             break
                     if detected_dorsal:
                         break
                 if detected_dorsal:
                     break
+
+            # Si se detectó dorsal y aún no tiene nombre, intentar leer el apellido impreso en la camiseta
+            if detected_dorsal and detected_dorsal not in player_names and crop_torso.size > 0:
+                try:
+                    cfg_text = "--psm 11"
+                    torso_text = pytesseract.image_to_string(crop_torso, config=cfg_text).strip()
+                    words = re.findall(r'\b[A-Za-z]{4,15}\b', torso_text)
+                    stopwords = {"NIKE", "ADIDAS", "PUMA", "DEPORTE", "VENEZUELA", "FUTBOL", "SOCCER", "MATCH", "RIN", "NAT"}
+                    for w in words:
+                        up = w.upper()
+                        if up not in stopwords and len(up) >= 4:
+                            player_names[detected_dorsal] = up.capitalize()
+                            break
+                except Exception:
+                    pass
 
         del gray, img
         gc.collect()
@@ -139,37 +154,46 @@ def detect_dorsal_and_face(img_bytes: bytes) -> Dict[str, Any]:
             "face_patch": face_patch
         }
     except Exception as e:
-        logger.error(f"Error detectando dorsal: {e}")
+        logger.error(f"Error detectando dorsal y rostro: {e}")
         return {"dorsal": None, "face_patch": None}
+
+def get_folder_for_dorsal(d_val: int) -> str:
+    """Genera el nombre de la carpeta: Dorsal_XX_Nombre si se conoce el nombre, o Dorsal_XX si solo tiene dorsal."""
+    s_d = str(d_val)
+    if s_d in player_names and player_names[s_d]:
+        return f"organizadas/Dorsal_{d_val:02d}_{player_names[s_d]}"
+    return f"organizadas/Dorsal_{d_val:02d}"
 
 def classify_strictly_by_dorsal_and_name(photo_items: List[Dict[str, Any]]) -> Dict[str, List[str]]:
     """
-    Clasificación ESTRICTA únicamente por DORSAL y NOMBRE.
-    Sin distinción de colores de uniforme ni etiquetas raras.
+    Clasificación ESTRICTA por DATOS BIOMÉTRICOS FACIALES y DORSAL/NOMBRE:
+    1. Agrupa en una única carpeta por jugador.
+    2. Compara los rasgos faciales biométricos para fotos de frente sin dorsal visible.
+    3. Si el jugador tiene nombre se coloca Dorsal_XX_Nombre, si no, Dorsal_XX.
     """
     folders_result = {}
     general_files = []
 
-    # Registrar el rostro de cada dorsal confirmado para juntar fotos de frente
-    dorsal_faces = {}  # {dorsal: face_patch}
+    # Banco biométrico facial: {dorsal: [rostro_1, rostro_2, ...]}
+    dorsal_face_bank = {}
 
-    # Pase 1: Identificar fotos con dorsal directo confirmado
+    # Pase 1: Identificar fotos con dorsal directo confirmado y registrar su perfil biométrico facial
     unassigned = []
     for item in photo_items:
         key = item["key"]
         dorsal = item["features"]["dorsal"]
         face = item["features"]["face_patch"]
 
-        if dorsal and dorsal in roster_map:
+        if dorsal and dorsal in valid_dorsals:
             d_val = int(dorsal)
-            folder_name = f"organizadas/Dorsal_{d_val:02d}_{roster_map[str(d_val)]}"
+            folder_name = get_folder_for_dorsal(d_val)
             folders_result.setdefault(folder_name, []).append(key)
-            if face is not None and dorsal not in dorsal_faces:
-                dorsal_faces[dorsal] = face
+            if face is not None:
+                dorsal_face_bank.setdefault(dorsal, []).append(face)
         else:
             unassigned.append(item)
 
-    # Pase 2: Para fotos sin dorsal visible (ej. de frente o tapadas), comparar rostro con los dorsales confirmados
+    # Pase 2: Comparación biométrica facial para fotos sin dorsal visible (de frente, en disputa, etc.)
     for item in unassigned:
         key = item["key"]
         face = item["features"]["face_patch"]
@@ -177,19 +201,20 @@ def classify_strictly_by_dorsal_and_name(photo_items: List[Dict[str, Any]]) -> D
 
         if face is not None:
             best_score = 0.0
-            for d, d_face in dorsal_faces.items():
-                res = cv2.matchTemplate(face, d_face, cv2.TM_CCOEFF_NORMED)
-                score = float(res[0][0])
-                if score > 0.55 and score > best_score:
-                    best_score = score
-                    matched_dorsal = d
+            for d, faces_list in dorsal_face_bank.items():
+                for d_face in faces_list:
+                    res = cv2.matchTemplate(face, d_face, cv2.TM_CCOEFF_NORMED)
+                    score = float(res[0][0])
+                    if score > 0.52 and score > best_score:
+                        best_score = score
+                        matched_dorsal = d
 
         if matched_dorsal:
             d_val = int(matched_dorsal)
-            folder_name = f"organizadas/Dorsal_{d_val:02d}_{roster_map[str(d_val)]}"
+            folder_name = get_folder_for_dorsal(d_val)
             folders_result.setdefault(folder_name, []).append(key)
         else:
-            # Foto sin dorsal identificado ni rostro de jugador confirmado -> Fotos Generales del Equipo
+            # Foto sin coincidencia facial ni dorsal -> Fotos Generales del Equipo
             general_files.append(key)
 
     if general_files:
