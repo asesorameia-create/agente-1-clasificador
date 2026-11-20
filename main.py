@@ -37,8 +37,8 @@ player_names = {
     "1": "Trujillo"
 }
 
-# Dorsales válidos del partido para descartar lecturas espurias de arrugas
-valid_dorsals = {"1", "4", "7", "10", "11", "9"}
+# Dorsales válidos del partido (Portero #1 Trujillo y Jugador #13)
+valid_dorsals = {"1", "13"}
 
 def get_r2_client():
     if not R2_ACCESS_KEY_ID or not R2_SECRET_ACCESS_KEY or not R2_ENDPOINT_URL:
@@ -160,19 +160,37 @@ def detect_dorsal_and_face(img_bytes: bytes) -> Dict[str, Any]:
                 face_patch = cv2.equalizeHist(face_patch)
                 face_fingerprint = extract_facial_biometric_fingerprint(face_crop)
 
-        # Búsqueda estricta de dorsal numérico (pecho, espalda o shorts)
+        # Búsqueda estricta de dorsal numérico (pecho, espalda o shorts) y verificación de uniforme
         detected_dorsal = None
+
+        # 1. Detección de jugada grupal (3 o más rostros prominentes en disputa)
+        if len(faces) >= 3:
+            del gray, img
+            gc.collect()
+            return {"dorsal": None, "face_patch": None, "fingerprint": None, "is_group": True}
+
+        # 2. Análisis cromático del uniforme (Verde = Portero Trujillo #1, Azul/Amarillo = Jugador #13)
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        torso_hsv = hsv[int(h*0.15):int(h*0.75), int(w*0.20):int(w*0.80)]
+        torso_pixels = max(1, torso_hsv.shape[0] * torso_hsv.shape[1])
+
+        green_mask = cv2.inRange(torso_hsv, np.array([35, 35, 35]), np.array([85, 255, 255]))
+        blue_mask = cv2.inRange(torso_hsv, np.array([95, 45, 35]), np.array([135, 255, 255]))
+
+        green_ratio = np.sum(green_mask > 0) / torso_pixels
+        blue_ratio = np.sum(blue_mask > 0) / torso_pixels
+
+        # 3. Lectura OCR estricta en torso y shorts
         if pytesseract:
-            # 1. Zona central (torso/espalda)
             cy1, cy2 = int(h * 0.15), int(h * 0.70)
             cx1, cx2 = int(w * 0.20), int(w * 0.80)
             crop_torso = gray[cy1:cy2, cx1:cx2]
 
-            # 2. Zona de shorts (donde suele estar el número pequeño)
             sy1, sy2 = int(h * 0.45), int(h * 0.85)
             sx1, sx2 = int(w * 0.25), int(w * 0.75)
             crop_shorts = gray[sy1:sy2, sx1:sx2]
 
+            # Búsqueda de texto explícito TRUJILLO o números exactos
             for target in [crop_torso, crop_shorts]:
                 if target.size == 0:
                     continue
@@ -182,11 +200,15 @@ def detect_dorsal_and_face(img_bytes: bytes) -> Dict[str, Any]:
                 thresh_inv = cv2.bitwise_not(thresh)
 
                 for t_img in [enhanced, thresh, thresh_inv]:
-                    cfg = "--psm 11 -c tessedit_char_whitelist=0123456789"
-                    txt = pytesseract.image_to_string(t_img, config=cfg).strip()
+                    cfg = "--psm 11"
+                    txt = pytesseract.image_to_string(t_img, config=cfg).upper()
+                    if "TRUJILLO" in txt:
+                        detected_dorsal = "1"
+                        break
+                    
                     nums = re.findall(r'\b([1-9][0-9]?)\b', txt)
                     for n in nums:
-                        if n in valid_dorsals:  # Validar estrictamente contra los dorsales del partido
+                        if n in valid_dorsals:
                             detected_dorsal = str(int(n))
                             break
                     if detected_dorsal:
@@ -194,8 +216,20 @@ def detect_dorsal_and_face(img_bytes: bytes) -> Dict[str, Any]:
                 if detected_dorsal:
                     break
 
-            # Fin de búsqueda de dorsal numérico
             del crop_torso, crop_shorts
+
+        # 4. Decisión armónica: Si el dorsal no fue detectado por OCR, usar el color del uniforme sin confundir
+        if not detected_dorsal:
+            if green_ratio > 0.05 and green_ratio > blue_ratio * 1.5:
+                detected_dorsal = "1"
+            elif blue_ratio > 0.05 and blue_ratio > green_ratio * 1.5:
+                detected_dorsal = "13"
+        elif detected_dorsal == "1" and blue_ratio > 0.12 and blue_ratio > green_ratio * 2.0:
+            # Corrección de seguridad: si un pliegue azul se leyó como 1 pero el uniforme es 100% azul
+            detected_dorsal = "13"
+        elif detected_dorsal != "1" and green_ratio > 0.12 and green_ratio > blue_ratio * 2.0:
+            # Corrección de seguridad: si la espalda de Trujillo se leyó como otro número pero viste de verde
+            detected_dorsal = "1"
 
         del gray, img
         gc.collect()
@@ -233,6 +267,10 @@ def classify_strictly_by_dorsal_and_name(photo_items: List[Dict[str, Any]]) -> D
     unassigned = []
     for item in photo_items:
         key = item["key"]
+        if item["features"].get("is_group"):
+            general_files.append(key)
+            continue
+
         dorsal = item["features"]["dorsal"]
         fp = item["features"].get("fingerprint")
 
