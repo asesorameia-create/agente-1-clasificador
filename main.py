@@ -4,7 +4,7 @@ import gc
 import re
 import zipfile
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from fastapi import FastAPI, BackgroundTasks, UploadFile, File
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, FileResponse
 import boto3
@@ -429,6 +429,21 @@ def get_backup_vault():
     except Exception as e:
         return {"backup_photos": [], "count": 0}
 
+@app.get("/api/boveda/foto/{filename}")
+def get_backup_photo(filename: str):
+    s3 = get_r2_client()
+    if not s3:
+        return JSONResponse({"error": "No R2"}, status_code=500)
+    try:
+        obj = s3.get_object(Bucket=R2_BUCKET_NAME, Key=f"boveda_respaldo/{filename}")
+        return StreamingResponse(
+            obj["Body"],
+            media_type="image/jpeg",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+
 @app.post("/api/procesar")
 def trigger_process(background_tasks: BackgroundTasks):
     if processing_status["is_processing"]:
@@ -613,7 +628,15 @@ def clean_dashboard():
             <div class="vault-card" id="cardBoveda" style="display: none;">
                 <div class="vault-title"><span>🛡️</span> Bóveda de Respaldo en la Nube (Anti-Pérdidas)</div>
                 <p class="vault-desc" id="vaultDesc">¿Borraste una foto por error en tu computadora? Tu copia de seguridad está a salvo en la nube.</p>
-                <a href="/api/descargar-boveda-zip" class="btn-vault" id="btnRestaurar">Restaurar Copia de Seguridad</a>
+                <div style="display: flex; gap: 10px; justify-content: center; flex-wrap: wrap;">
+                    <a href="/api/descargar-boveda-zip" class="btn-vault" id="btnRestaurar">📦 Restaurar Todo en ZIP</a>
+                    <button class="btn-vault" style="background: #27272a; color: #ffffff; border-color: #52525b;" onclick="abrirRescateIndividual()">🔍 Rescatar Foto Suelta</button>
+                </div>
+                <div id="modalRescate" style="display: none; margin-top: 16px; background: #18181b; border: 1px solid #3f3f46; border-radius: 12px; padding: 14px; text-align: left;">
+                    <h4 style="font-size: 13px; color: #facc15; margin-bottom: 8px;">Selecciona la foto que perdiste para descargarla:</h4>
+                    <div id="listaFotosRescate" style="max-height: 220px; overflow-y: auto;"></div>
+                    <button class="btn-clean" style="margin-top: 8px;" onclick="cerrarRescateIndividual()">Cerrar</button>
+                </div>
             </div>
         </div>
 
@@ -738,6 +761,33 @@ def clean_dashboard():
                         btnDescargar.style.display = "none";
                     }
                 } catch(e) {}
+            }
+
+            async function abrirRescateIndividual() {
+                const modal = document.getElementById("modalRescate");
+                const lista = document.getElementById("listaFotosRescate");
+                modal.style.display = "block";
+                lista.innerHTML = "<p style='color:#a1a1aa; font-size:12px;'>Cargando fotos de la bóveda...</p>";
+                try {
+                    const res = await fetch("/api/boveda");
+                    const data = await res.json();
+                    if (data.backup_photos && data.backup_photos.length > 0) {
+                        lista.innerHTML = data.backup_photos.map(f => `
+                            <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; border-bottom: 1px solid #27272a; font-size: 13px;">
+                                <span style="color: #e4e4e7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 210px;">📷 ${f}</span>
+                                <a href="/api/boveda/foto/${f}" download style="background: #ef4444; color: white; padding: 6px 12px; border-radius: 8px; text-decoration: none; font-weight: bold; font-size: 12px;">Descargar</a>
+                            </div>
+                        `).join("");
+                    } else {
+                        lista.innerHTML = "<p style='color:#a1a1aa; font-size:12px;'>No hay fotos respaldadas aún.</p>";
+                    }
+                } catch(e) {
+                    lista.innerHTML = "<p style='color:#ef4444; font-size:12px;'>Error al cargar fotos.</p>";
+                }
+            }
+
+            function cerrarRescateIndividual() {
+                document.getElementById("modalRescate").style.display = "none";
             }
 
             async function refrescarBoveda() {
