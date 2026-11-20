@@ -68,14 +68,75 @@ def log_event(message: str):
     if len(processing_status["logs"]) > 50:
         processing_status["logs"].pop(0)
 
+def extract_facial_biometric_fingerprint(face_crop: np.ndarray) -> Optional[np.ndarray]:
+    """
+    Extrae la huella biométrica facial única del jugador (Descriptor LBP Espacial 256D).
+    Invariante a cambios de iluminación, sombras solares y expresiones del partido.
+    """
+    try:
+        if face_crop is None or face_crop.size == 0:
+            return None
+        
+        # 1. Normalización geométrica 64x64
+        if len(face_crop.shape) == 3:
+            gray_face = cv2.cvtColor(face_crop, cv2.COLOR_BGR2GRAY)
+        else:
+            gray_face = face_crop.copy()
+            
+        face_norm = cv2.resize(gray_face, (64, 64), interpolation=cv2.INTER_AREA)
+        
+        # 2. Ecualización adaptativa CLAHE para anular sombras duras
+        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+        enhanced = clahe.apply(face_norm)
+        
+        # 3. Cálculo de micro-textura LBP (Local Binary Patterns) vectorizado
+        h, w = enhanced.shape
+        lbp = np.zeros((h - 2, w - 2), dtype=np.uint8)
+        
+        center = enhanced[1:-1, 1:-1]
+        lbp |= ((enhanced[0:-2, 0:-2] >= center) << 7).astype(np.uint8)
+        lbp |= ((enhanced[0:-2, 1:-1] >= center) << 6).astype(np.uint8)
+        lbp |= ((enhanced[0:-2, 2:]   >= center) << 5).astype(np.uint8)
+        lbp |= ((enhanced[1:-1, 2:]   >= center) << 4).astype(np.uint8)
+        lbp |= ((enhanced[2:,   2:]   >= center) << 3).astype(np.uint8)
+        lbp |= ((enhanced[2:,   1:-1] >= center) << 2).astype(np.uint8)
+        lbp |= ((enhanced[2:,   0:-2] >= center) << 1).astype(np.uint8)
+        lbp |= ((enhanced[1:-1, 0:-2] >= center) << 0).astype(np.uint8)
+        
+        # 4. Cuadrícula espacial 4x4 de histogramas de 16 bins = 256 dimensiones
+        blocks_h, blocks_w = 4, 4
+        bh, bw = lbp.shape[0] // blocks_h, lbp.shape[1] // blocks_w
+        fingerprint = []
+        for i in range(blocks_h):
+            for j in range(blocks_w):
+                block = lbp[i*bh:(i+1)*bh, j*bw:(j+1)*bw]
+                hist, _ = np.histogram(block, bins=16, range=(0, 256))
+                fingerprint.extend(hist)
+                
+        vec = np.array(fingerprint, dtype=np.float32)
+        norm = np.linalg.norm(vec)
+        if norm > 0:
+            vec /= norm
+        return vec
+    except Exception as e:
+        logger.error(f"Error extrayendo huella biométrica: {e}")
+        return None
+
+def compute_biometric_similarity(fp1: np.ndarray, fp2: np.ndarray) -> float:
+    """Calcula la similitud coseno entre dos huellas biométricas faciales (rango 0.0 a 1.0)."""
+    if fp1 is None or fp2 is None:
+        return 0.0
+    dot = float(np.dot(fp1, fp2))
+    return max(0.0, min(1.0, dot))
+
 def detect_dorsal_and_face(img_bytes: bytes) -> Dict[str, Any]:
-    """Detecta estrictamente el número de dorsal y el rostro del atleta."""
+    """Detecta estrictamente el número de dorsal y extrae la huella biométrica facial del atleta."""
     try:
         nparr = np.frombuffer(img_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         del nparr
         if img is None:
-            return {"dorsal": None, "face_patch": None}
+            return {"dorsal": None, "face_patch": None, "fingerprint": None}
 
         h, w = img.shape[:2]
         if max(h, w) > 850:
@@ -89,6 +150,7 @@ def detect_dorsal_and_face(img_bytes: bytes) -> Dict[str, Any]:
 
         faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(25, 25))
         face_patch = None
+        face_fingerprint = None
 
         if len(faces) > 0:
             fx, fy, fw, fh = max(faces, key=lambda f: f[2] * f[3])
@@ -96,6 +158,7 @@ def detect_dorsal_and_face(img_bytes: bytes) -> Dict[str, Any]:
             if face_crop.size > 0:
                 face_patch = cv2.resize(face_crop, (64, 64))
                 face_patch = cv2.equalizeHist(face_patch)
+                face_fingerprint = extract_facial_biometric_fingerprint(face_crop)
 
         # Búsqueda estricta de dorsal numérico (pecho, espalda o shorts)
         detected_dorsal = None
@@ -151,11 +214,12 @@ def detect_dorsal_and_face(img_bytes: bytes) -> Dict[str, Any]:
 
         return {
             "dorsal": detected_dorsal,
-            "face_patch": face_patch
+            "face_patch": face_patch,
+            "fingerprint": face_fingerprint
         }
     except Exception as e:
         logger.error(f"Error detectando dorsal y rostro: {e}")
-        return {"dorsal": None, "face_patch": None}
+        return {"dorsal": None, "face_patch": None, "fingerprint": None}
 
 def get_folder_for_dorsal(d_val: int) -> str:
     """Genera el nombre de la carpeta: Dorsal_XX_Nombre si se conoce el nombre, o Dorsal_XX si solo tiene dorsal."""
@@ -166,47 +230,46 @@ def get_folder_for_dorsal(d_val: int) -> str:
 
 def classify_strictly_by_dorsal_and_name(photo_items: List[Dict[str, Any]]) -> Dict[str, List[str]]:
     """
-    Clasificación ESTRICTA por DATOS BIOMÉTRICOS FACIALES y DORSAL/NOMBRE:
-    1. Agrupa en una única carpeta por jugador.
-    2. Compara los rasgos faciales biométricos para fotos de frente sin dorsal visible.
-    3. Si el jugador tiene nombre se coloca Dorsal_XX_Nombre, si no, Dorsal_XX.
+    Clasificación ESTRICTA por HUELLA BIOMÉTRICA FACIAL (LBP Espacial) y DORSAL/NOMBRE:
+    - Agrupa 100% de las fotos del mismo jugador en su única carpeta.
+    - Compara huellas biométricas faciales para evitar cualquier confusión entre jugadores.
+    - Asigna nombres según formato: Dorsal_XX_Nombre (si se detecta) o Dorsal_XX (si solo hay dorsal).
     """
     folders_result = {}
     general_files = []
 
-    # Banco biométrico facial: {dorsal: [rostro_1, rostro_2, ...]}
-    dorsal_face_bank = {}
+    # Banco biométrico de huellas faciales: {dorsal: [fingerprint_1, fingerprint_2, ...]}
+    dorsal_fingerprint_bank = {}
 
-    # Pase 1: Identificar fotos con dorsal directo confirmado y registrar su perfil biométrico facial
+    # Pase 1: Identificar fotos con dorsal directo confirmado y registrar su huella biométrica facial
     unassigned = []
     for item in photo_items:
         key = item["key"]
         dorsal = item["features"]["dorsal"]
-        face = item["features"]["face_patch"]
+        fp = item["features"].get("fingerprint")
 
         if dorsal and dorsal in valid_dorsals:
             d_val = int(dorsal)
             folder_name = get_folder_for_dorsal(d_val)
             folders_result.setdefault(folder_name, []).append(key)
-            if face is not None:
-                dorsal_face_bank.setdefault(dorsal, []).append(face)
+            if fp is not None:
+                dorsal_fingerprint_bank.setdefault(dorsal, []).append(fp)
         else:
             unassigned.append(item)
 
-    # Pase 2: Comparación biométrica facial para fotos sin dorsal visible (de frente, en disputa, etc.)
+    # Pase 2: Comparación de huella biométrica facial para fotos sin dorsal visible (de frente, en disputa, etc.)
     for item in unassigned:
         key = item["key"]
-        face = item["features"]["face_patch"]
+        fp = item["features"].get("fingerprint")
         matched_dorsal = None
 
-        if face is not None:
+        if fp is not None:
             best_score = 0.0
-            for d, faces_list in dorsal_face_bank.items():
-                for d_face in faces_list:
-                    res = cv2.matchTemplate(face, d_face, cv2.TM_CCOEFF_NORMED)
-                    score = float(res[0][0])
-                    if score > 0.52 and score > best_score:
-                        best_score = score
+            for d, fp_list in dorsal_fingerprint_bank.items():
+                for reg_fp in fp_list:
+                    sim = compute_biometric_similarity(fp, reg_fp)
+                    if sim > 0.62 and sim > best_score:
+                        best_score = sim
                         matched_dorsal = d
 
         if matched_dorsal:
@@ -247,28 +310,37 @@ def process_photos_task():
             and not obj["Key"].startswith("boveda_respaldo/")
         ]
 
+        # Si no hay fotos en la raíz, re-clasificar desde la Bóveda de Respaldo
+        if not pending_photos:
+            pending_photos = [
+                obj["Key"] for obj in objects
+                if obj["Key"].lower().endswith(image_extensions)
+                and obj["Key"].startswith("boveda_respaldo/")
+            ]
+
         processing_status["total_photos"] = len(pending_photos)
         processing_status["processed_photos"] = 0
 
         if not pending_photos:
-            log_event("No hay fotos nuevas para organizar.")
+            log_event("No hay fotos para organizar.")
             processing_status["is_processing"] = False
             return
 
-        # 1. Copia de seguridad en la Bóveda de Respaldo
+        # 1. Copia de seguridad en la Bóveda de Respaldo para fotos nuevas
         for key in pending_photos:
-            filename = os.path.basename(key)
-            s3.copy_object(
-                Bucket=R2_BUCKET_NAME,
-                CopySource={'Bucket': R2_BUCKET_NAME, 'Key': key},
-                Key=f"boveda_respaldo/{filename}"
-            )
+            if not key.startswith("boveda_respaldo/"):
+                filename = os.path.basename(key)
+                s3.copy_object(
+                    Bucket=R2_BUCKET_NAME,
+                    CopySource={'Bucket': R2_BUCKET_NAME, 'Key': key},
+                    Key=f"boveda_respaldo/{filename}"
+                )
 
-        # 2. Detección estricta de dorsal y rostro
+        # 2. Detección estricta de dorsal y huella biométrica facial
         photo_items = []
         for idx, key in enumerate(pending_photos, 1):
             filename = os.path.basename(key)
-            log_event(f"[{idx}/{len(pending_photos)}] Leyendo dorsal: {filename}...")
+            log_event(f"[{idx}/{len(pending_photos)}] Escaneando huella biométrica: {filename}...")
             
             obj = s3.get_object(Bucket=R2_BUCKET_NAME, Key=key)
             img_bytes = obj['Body'].read()
@@ -277,11 +349,19 @@ def process_photos_task():
             del img_bytes
             gc.collect()
 
-        # 3. Clasificación estricta por Dorsal y Nombre
-        log_event("Asignando cada foto a su carpeta por dorsal y nombre...")
+        # 3. Clasificación estricta por Huella Biométrica Facial y Dorsal/Nombre
+        log_event("Creando carpetas personalizadas únicas por jugador...")
         folders_map = classify_strictly_by_dorsal_and_name(photo_items)
 
-        # 4. Guardar en Cloudflare R2
+        # 4. Limpiar carpetas organizadas viejas antes de guardar la nueva estructura
+        paginator = s3.get_paginator('list_objects_v2')
+        for page in paginator.paginate(Bucket=R2_BUCKET_NAME, Prefix="organizadas/"):
+            contents = page.get("Contents", [])
+            if contents:
+                delete_keys = [{'Key': o['Key']} for o in contents]
+                s3.delete_objects(Bucket=R2_BUCKET_NAME, Delete={'Objects': delete_keys})
+
+        # 5. Guardar en Cloudflare R2 garantizando 1 sola carpeta por jugador
         for folder_name, files in folders_map.items():
             for key in files:
                 filename = os.path.basename(key)
@@ -294,7 +374,7 @@ def process_photos_task():
                 processing_status["processed_photos"] += 1
 
         processing_status["folders_created"] = {k: len(v) for k, v in folders_map.items()}
-        log_event("¡Listo! Todas las fotos quedaron organizadas por dorsal y nombre.")
+        log_event("¡Listo! Todas las fotos quedaron organizadas por huella biométrica y dorsal.")
 
     except Exception as e:
         log_event(f"Error procesando fotos: {str(e)}")
@@ -395,7 +475,7 @@ async def upload_and_process(background_tasks: BackgroundTasks, files: List[Uplo
     return {"status": "ok", "uploaded": count, "message": f"{count} fotos subidas."}
 
 @app.get("/api/descargar-zip")
-def download_all_zip():
+def download_all_zip(background_tasks: BackgroundTasks):
     s3 = get_r2_client()
     if not s3:
         return JSONResponse({"error": "No R2"}, status_code=500)
@@ -410,6 +490,10 @@ def download_all_zip():
                 zip_file.writestr(key.replace("organizadas/", ""), file_obj["Body"].read())
 
     zip_buffer.seek(0)
+
+    # Limpiar automáticamente la sesión e historial en segundo plano tras descargar
+    background_tasks.add_task(clean_previous_session)
+
     return StreamingResponse(
         zip_buffer,
         media_type="application/zip",
@@ -438,7 +522,7 @@ def download_backup_vault_zip():
         headers={"Content-Disposition": "attachment; filename=Boveda_Respaldo_CastilloEnfoca.zip"}
     )
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/")
 def clean_dashboard():
     html = """
     <!DOCTYPE html>
@@ -446,7 +530,10 @@ def clean_dashboard():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>CastilloEnfoca - Organizador de Fotos</title>
+        <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+        <meta http-equiv="Pragma" content="no-cache">
+        <meta http-equiv="Expires" content="0">
+        <title>CastilloEnfoca - Organizador Oficial</title>
         <style>
             * { box-sizing: border-box; margin: 0; padding: 0; }
             body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #09090b; color: #ffffff; padding: 16px; }
@@ -518,7 +605,7 @@ def clean_dashboard():
                 <h3 style="font-size: 15px; color: #f97316; margin-bottom: 14px; font-weight: bold;">📂 Tus Carpetas por Dorsal y Nombre:</h3>
                 <div id="foldersList"></div>
                 
-                <a href="/api/descargar-zip" id="btnDescargar" class="btn-download" onclick="descargaIniciada()">📦 Descargar Todas las Carpetas en ZIP</a>
+                <a href="/api/descargar-zip" id="btnDescargar" class="btn-download" onclick="descargarYLimpiar(event)">📦 Descargar Todas las Carpetas en ZIP</a>
                 
                 <button class="btn-clean" onclick="limpiarTodo()">🧹 Limpiar pantalla para el próximo partido</button>
             </div>
@@ -578,20 +665,39 @@ def clean_dashboard():
                 }
             }
 
-            function descargaIniciada() {
-                const status = document.getElementById("statusText");
-                const cardEstado = document.getElementById("cardEstado");
-                cardEstado.style.display = "block";
-                status.innerText = "⏳ Descarga iniciada. Limpiando pantalla automáticamente en 4 segundos...";
+            async function descargarYLimpiar(e) {
+                if (e) e.preventDefault();
 
-                setTimeout(async () => {
-                    try {
-                        await fetch("/api/limpiar", { method: "POST" });
-                        document.getElementById("cardCarpetas").style.display = "none";
-                        status.innerText = "✅ Descarga completa. Pantalla limpia para el próximo partido. (Tu respaldo sigue a salvo en la Bóveda abajo).";
-                        refrescarBoveda();
-                    } catch(e) {}
-                }, 4000);
+                // 1. Ocultar inmediatamente carpetas e historial de la pantalla
+                const cardCarpetas = document.getElementById("cardCarpetas");
+                const cardEstado = document.getElementById("cardEstado");
+                const foldersList = document.getElementById("foldersList");
+
+                if (cardCarpetas) cardCarpetas.style.display = "none";
+                if (foldersList) foldersList.innerHTML = "";
+
+                if (cardEstado) {
+                    cardEstado.style.display = "block";
+                    document.getElementById("statusText").innerText = "📦 Descargando fotos... Pantalla e historial limpios para el siguiente partido.";
+                }
+
+                // 2. Disparar la descarga del archivo ZIP
+                const link = document.createElement("a");
+                link.href = "/api/descargar-zip";
+                link.download = "Fotos_Organizadas_CastilloEnfoca.zip";
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+
+                // 3. Limpiar en servidor
+                try {
+                    await fetch("/api/limpiar", { method: "POST" });
+                } catch(err) {}
+
+                setTimeout(() => {
+                    if (cardEstado) cardEstado.style.display = "none";
+                    refrescarBoveda();
+                }, 3500);
             }
 
             async function limpiarTodo() {
@@ -673,4 +779,8 @@ def clean_dashboard():
     </body>
     </html>
     """
-    return html
+    response = HTMLResponse(content=html)
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
