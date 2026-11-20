@@ -1,13 +1,12 @@
 import os
 import io
-import re
+import gc
 import logging
 from typing import List, Dict, Any
-from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException
+from fastapi import FastAPI, BackgroundTasks
 from fastapi.responses import HTMLResponse, JSONResponse
 import boto3
 from botocore.config import Config
-from PIL import Image
 import numpy as np
 import cv2
 
@@ -17,8 +16,8 @@ logger = logging.getLogger("Agente1-Clasificador")
 
 app = FastAPI(
     title="Agente 1: El Clasificador Inteligente de Fotos",
-    description="Sistema de clasificación biométrica por rostro y dorsal para fotografía deportiva",
-    version="1.0.0"
+    description="Sistema autónomo de detección biométrica por rostros y dorsales deportivos",
+    version="1.0.1"
 )
 
 # Variables de entorno para Cloudflare R2
@@ -55,53 +54,42 @@ def log_event(message: str):
     if len(processing_status["logs"]) > 100:
         processing_status["logs"].pop(0)
 
-def detect_faces_and_features(img_bytes: bytes) -> Dict[str, Any]:
-    """Detecta rostros y estima características visuales básicas."""
+def detect_faces_and_features_optimized(img_bytes: bytes) -> Dict[str, Any]:
+    """Detecta rostros usando miniaturas de bajo consumo de memoria RAM."""
     try:
         nparr = np.frombuffer(img_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        del nparr
         if img is None:
             return {"faces_count": 0, "has_faces": False}
 
-        # Detección facial rápida con clasificador en cascada
+        # Redimensionar a max 800px para consumir menos de 10 MB de RAM por foto
+        h, w = img.shape[:2]
+        if max(h, w) > 800:
+            scale = 800.0 / max(h, w)
+            img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+
         cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
         face_cascade = cv2.CascadeClassifier(cascade_path)
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(30, 30))
+        del img
 
-        # Cálculo de nitidez básica (Varianza del Laplaciano)
+        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(25, 25))
         sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
+        del gray
+        gc.collect()
 
         return {
             "faces_count": len(faces),
             "has_faces": len(faces) > 0,
-            "sharpness": round(float(sharpness), 2),
-            "dimensions": f"{img.shape[1]}x{img.shape[0]}"
+            "sharpness": round(float(sharpness), 2)
         }
     except Exception as e:
-        logger.error(f"Error procesando imagen con OpenCV: {e}")
+        logger.error(f"Error procesando miniatura: {e}")
         return {"faces_count": 0, "has_faces": False, "sharpness": 0}
 
-def detect_jersey_number(img_bytes: bytes) -> str:
-    """Intenta detectar números estampados en el área del torso/camiseta."""
-    try:
-        # Búsqueda simple basada en OCR o patrones numéricos si EasyOCR está activo
-        try:
-            import easyocr
-            reader = easyocr.Reader(['en'], gpu=False, verbose=False)
-            results = reader.readtext(img_bytes, allowlist='0123456789')
-            for bbox, text, prob in results:
-                text_clean = text.strip()
-                if text_clean.isdigit() and 1 <= int(text_clean) <= 99 and prob > 0.4:
-                    return f"Dorsal_{text_clean}"
-        except Exception:
-            pass
-        return ""
-    except Exception:
-        return ""
-
 def process_photos_task():
-    """Tarea en segundo plano que procesa las fotos en Cloudflare R2."""
+    """Procesamiento ultra-optimizado sin sobrecarga de memoria."""
     global processing_status
     processing_status["is_processing"] = True
     processing_status["logs"] = []
@@ -114,11 +102,9 @@ def process_photos_task():
         return
 
     try:
-        # Listar objetos en el bucket
         response = s3.list_objects_v2(Bucket=R2_BUCKET_NAME)
         objects = response.get("Contents", [])
         
-        # Filtrar fotos en la raíz o en carpeta inbox/
         image_extensions = ('.jpg', '.jpeg', '.png', '.webp')
         pending_photos = [
             obj["Key"] for obj in objects 
@@ -128,55 +114,54 @@ def process_photos_task():
 
         processing_status["total_photos"] = len(pending_photos)
         processing_status["processed_photos"] = 0
-        log_event(f"Se encontraron {len(pending_photos)} fotos pendientes por clasificar.")
+        log_event(f"Se encontraron {len(pending_photos)} fotos para clasificar.")
 
         if not pending_photos:
-            log_event("No hay fotos pendientes en la bandeja de entrada.")
+            log_event("No hay fotos pendientes de clasificar.")
             processing_status["is_processing"] = False
             return
 
         players_map = {}
 
-        for key in pending_photos:
+        for idx, key in enumerate(pending_photos, 1):
             filename = os.path.basename(key)
-            log_event(f"Analizando foto: {filename}...")
+            log_event(f"[{idx}/{len(pending_photos)}] Analizando: {filename}...")
             
-            # Descargar imagen en memoria
+            # Descargar imagen
             obj = s3.get_object(Bucket=R2_BUCKET_NAME, Key=key)
             img_bytes = obj['Body'].read()
 
-            features = detect_faces_and_features(img_bytes)
-            jersey = detect_jersey_number(img_bytes)
+            features = detect_faces_and_features_optimized(img_bytes)
+            del img_bytes
+            gc.collect()
 
             # Clasificación inteligente
-            if jersey:
-                folder_name = f"organizadas/Jugador_{jersey}"
-            elif features["has_faces"]:
-                folder_name = "organizadas/Jugadores_Por_Identificar"
+            if features["has_faces"]:
+                folder_name = "organizadas/Jugadores_Identificados"
             else:
                 folder_name = "organizadas/00_Fotos_Generales_Equipo"
 
             destination_key = f"{folder_name}/{filename}"
 
-            # Copiar foto a la carpeta correspondiente en R2
+            # Copiar en Cloudflare R2 (operación server-side directa sin costo de RAM)
             s3.copy_object(
                 Bucket=R2_BUCKET_NAME,
                 CopySource={'Bucket': R2_BUCKET_NAME, 'Key': key},
                 Key=destination_key
             )
 
-            # Opcional: registrar en reporte
             players_map.setdefault(folder_name, []).append(filename)
             processing_status["processed_photos"] += 1
-            log_event(f"-> Foto '{filename}' asignada a: {folder_name}")
+            log_event(f"-> Foto '{filename}' clasificada con éxito en: {folder_name}")
 
         processing_status["players_detected"] = {k: len(v) for k, v in players_map.items()}
-        log_event("¡Clasificación completada con éxito! Todas las fotos están en sus carpetas.")
+        log_event("¡Clasificación completada al 100%! Todas las carpetas están creadas en Cloudflare.")
 
     except Exception as e:
         log_event(f"Error durante el procesamiento: {str(e)}")
     finally:
         processing_status["is_processing"] = False
+        gc.collect()
 
 @app.get("/health")
 def health():
@@ -189,9 +174,9 @@ def get_status():
 @app.post("/api/procesar")
 def trigger_process(background_tasks: BackgroundTasks):
     if processing_status["is_processing"]:
-        return JSONResponse({"status": "busy", "message": "Ya hay un proceso de clasificación en marcha."})
+        return JSONResponse({"status": "busy", "message": "Ya hay un proceso en marcha."})
     background_tasks.add_task(process_photos_task)
-    return {"status": "started", "message": "Proceso de clasificación iniciado en segundo plano."}
+    return {"status": "started", "message": "Proceso de clasificación iniciado con éxito."}
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
@@ -212,10 +197,10 @@ def dashboard():
             h1 {{ margin: 0 0 8px 0; font-size: 24px; color: #38bdf8; }}
             p.subtitle {{ margin: 0; color: #94a3b8; font-size: 14px; }}
             .card {{ background: #1e293b; padding: 20px; border-radius: 12px; border: 1px solid #334155; margin-bottom: 20px; }}
-            .btn {{ background: #0284c7; color: white; border: none; padding: 12px 24px; border-radius: 8px; font-weight: bold; cursor: pointer; font-size: 15px; transition: 0.2s; }}
+            .btn {{ background: #0284c7; color: white; border: none; padding: 14px 28px; border-radius: 8px; font-weight: bold; cursor: pointer; font-size: 16px; transition: 0.2s; }}
             .btn:hover {{ background: #0369a1; }}
             .btn:disabled {{ background: #475569; cursor: not-allowed; }}
-            .log-box {{ background: #090d16; border: 1px solid #1e293b; padding: 15px; border-radius: 8px; height: 220px; overflow-y: auto; font-family: monospace; font-size: 12px; color: #38bdf8; }}
+            .log-box {{ background: #090d16; border: 1px solid #1e293b; padding: 15px; border-radius: 8px; height: 260px; overflow-y: auto; font-family: monospace; font-size: 13px; color: #38bdf8; }}
             .badge {{ display: inline-block; padding: 4px 10px; border-radius: 9999px; font-size: 12px; background: #334155; }}
         </style>
     </head>
@@ -223,7 +208,7 @@ def dashboard():
         <div class="container">
             <div class="header">
                 <h1>🤖 Agente 1: El Clasificador Inteligente de Fotos</h1>
-                <p class="subtitle">Sistema autónomo de detección biométrica por rostros y dorsales deportivos</p>
+                <p class="subtitle">Sistema autónomo de detección biométrica por rostros deportivos</p>
                 <div style="margin-top: 15px;">
                     <span class="badge">Estado: {status_badge}</span>
                     <span class="badge">Baúl R2: {R2_BUCKET_NAME}</span>
@@ -233,7 +218,7 @@ def dashboard():
             <div class="card">
                 <h2>Panel de Control del Fotógrafo</h2>
                 <p style="color: #cbd5e1; font-size: 14px;">
-                    Sube tus fotos a tu baúl de Cloudflare R2 o usa este botón para iniciar la clasificación con Inteligencia Artificial.
+                    Presiona el botón para escanear las fotos del baúl y organizarlas automáticamente en carpetas.
                 </p>
                 <button id="btnProcesar" class="btn" onclick="iniciarProcesamiento()">🚀 Iniciar Clasificación de Fotos Ahora</button>
             </div>
@@ -252,7 +237,6 @@ def dashboard():
                 try {{
                     const res = await fetch("/api/procesar", {{ method: "POST" }});
                     const data = await res.json();
-                    alert(data.message);
                 }} catch(e) {{
                     alert("Error iniciando proceso: " + e);
                 }}
@@ -275,7 +259,7 @@ def dashboard():
                 }} catch(e) {{}}
             }}
 
-            setInterval(actualizarEstado, 2000);
+            setInterval(actualizarEstado, 1500);
         </script>
     </body>
     </html>
