@@ -583,7 +583,7 @@ def clean_dashboard():
             .container { max-width: 520px; margin: 0 auto; position: relative; z-index: 1; }
             
             .header { text-align: center; margin-bottom: 24px; padding-top: 10px; }
-            .logo-img { width: 110px; height: 110px; border-radius: 50%; margin: 0 auto 12px auto; display: block; box-shadow: 0 0 28px rgba(234, 88, 12, 0.5); border: 2px solid #ea580c; }
+            .logo-img { width: 110px; height: 110px; border-radius: 50%; margin: 0 auto 12px auto; display: block; box-shadow: 0 0 25px rgba(239, 68, 68, 0.45); border: 2px solid #ef4444; }
             .header h1 { font-size: 26px; font-weight: 900; letter-spacing: 1px; margin-bottom: 2px; }
             .brand-white { color: #ffffff; }
             .brand-red { color: #f97316; }
