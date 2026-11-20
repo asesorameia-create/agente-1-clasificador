@@ -448,7 +448,8 @@ def clean_dashboard():
             .btn-action:active { transform: scale(0.98); }
             .btn-action:disabled { background: #3f3f46; box-shadow: none; }
 
-            .btn-download { width: 100%; background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: white; border: none; padding: 16px; border-radius: 14px; font-size: 17px; font-weight: bold; cursor: pointer; margin-top: 14px; text-align: center; text-decoration: none; display: none; box-shadow: 0 4px 15px rgba(16,185,129,0.3); }
+            .btn-download { width: 100%; background: linear-gradient(135deg, #ef4444 0%, #f97316 100%); color: white; border: none; padding: 18px; border-radius: 14px; font-size: 18px; font-weight: 900; cursor: pointer; margin-top: 14px; text-align: center; text-decoration: none; display: none; box-shadow: 0 4px 20px rgba(239, 68, 68, 0.45); text-transform: uppercase; letter-spacing: 0.5px; transition: transform 0.15s, box-shadow 0.15s; }
+            .btn-download:active { transform: scale(0.98); }
             
             .btn-clean { width: 100%; background: transparent; color: #a1a1aa; border: 1px solid #27272a; padding: 12px; border-radius: 12px; font-size: 13px; cursor: pointer; margin-top: 12px; text-align: center; }
             .btn-clean:hover { color: #f43f5e; border-color: #f43f5e; }
@@ -457,13 +458,13 @@ def clean_dashboard():
             
             .folder-item { background: #18181b; border: 1px solid #27272a; border-radius: 12px; padding: 14px 16px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
             .folder-name { font-weight: bold; font-size: 15px; color: #ffffff; }
-            .folder-count { background: linear-gradient(135deg, #e11d48 0%, #ea580c 100%); padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: bold; }
+            .folder-count { background: linear-gradient(135deg, #ef4444 0%, #f97316 100%); padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: bold; }
 
-            .vault-card { background: #111114; border: 1px solid #27272a; border-radius: 14px; padding: 16px; margin-top: 14px; text-align: center; }
-            .vault-title { font-size: 14px; font-weight: bold; color: #facc15; margin-bottom: 6px; display: flex; align-items: center; justify-content: center; gap: 6px; }
-            .vault-desc { font-size: 12px; color: #a1a1aa; margin-bottom: 10px; }
-            .btn-vault { background: #27272a; color: #facc15; border: 1px solid #3f3f46; padding: 10px 16px; border-radius: 10px; font-size: 13px; font-weight: bold; text-decoration: none; display: inline-block; cursor: pointer; }
-            .btn-vault:hover { background: #3f3f46; }
+            .vault-card { background: #111114; border: 1px solid #27272a; border-radius: 14px; padding: 18px; margin-top: 18px; text-align: center; }
+            .vault-title { font-size: 15px; font-weight: bold; color: #facc15; margin-bottom: 6px; display: flex; align-items: center; justify-content: center; gap: 8px; }
+            .vault-desc { font-size: 13px; color: #a1a1aa; margin-bottom: 12px; line-height: 1.4; }
+            .btn-vault { background: #1c1917; color: #facc15; border: 1px solid #78350f; padding: 12px 20px; border-radius: 10px; font-size: 14px; font-weight: bold; text-decoration: none; display: inline-block; cursor: pointer; transition: 0.2s; }
+            .btn-vault:hover { background: #292524; border-color: #facc15; }
         </style>
     </head>
     <body>
@@ -494,13 +495,13 @@ def clean_dashboard():
                 
                 <a href="/api/descargar-zip" id="btnDescargar" class="btn-download" onclick="descargaIniciada()">📦 Descargar Todas las Carpetas en ZIP</a>
                 
-                <button class="btn-clean" onclick="limpiarTodo()">🧹 Limpiar para el siguiente partido</button>
+                <button class="btn-clean" onclick="limpiarTodo()">🧹 Limpiar pantalla para el próximo partido</button>
+            </div>
 
-                <div class="vault-card">
-                    <div class="vault-title"><span>🛡️</span> Bóveda de Respaldo en la Nube</div>
-                    <p class="vault-desc">¿Borraste una foto por error en tu computadora? Tu copia de seguridad está a salvo aquí.</p>
-                    <a href="/api/descargar-boveda-zip" class="btn-vault">Restaurar Copia de Seguridad</a>
-                </div>
+            <div class="vault-card" id="cardBoveda" style="display: none;">
+                <div class="vault-title"><span>🛡️</span> Bóveda de Respaldo en la Nube (Anti-Pérdidas)</div>
+                <p class="vault-desc" id="vaultDesc">¿Borraste una foto por error en tu computadora? Tu copia de seguridad está a salvo en la nube.</p>
+                <a href="/api/descargar-boveda-zip" class="btn-vault" id="btnRestaurar">Restaurar Copia de Seguridad</a>
             </div>
         </div>
 
@@ -553,12 +554,19 @@ def clean_dashboard():
             }
 
             function descargaIniciada() {
-                setTimeout(() => {
-                    const status = document.getElementById("statusText");
-                    const cardEstado = document.getElementById("cardEstado");
-                    cardEstado.style.display = "block";
-                    status.innerText = "✅ Descarga lista. Tu respaldo quedó a salvo en la Bóveda de Respaldo.";
-                }, 1500);
+                const status = document.getElementById("statusText");
+                const cardEstado = document.getElementById("cardEstado");
+                cardEstado.style.display = "block";
+                status.innerText = "⏳ Descarga iniciada. Limpiando pantalla automáticamente en 4 segundos...";
+
+                setTimeout(async () => {
+                    try {
+                        await fetch("/api/limpiar", { method: "POST" });
+                        document.getElementById("cardCarpetas").style.display = "none";
+                        status.innerText = "✅ Descarga completa. Pantalla limpia para el próximo partido. (Tu respaldo sigue a salvo en la Bóveda abajo).";
+                        refrescarBoveda();
+                    } catch(e) {}
+                }, 4000);
             }
 
             async function limpiarTodo() {
@@ -569,6 +577,7 @@ def clean_dashboard():
                     document.getElementById("cardEstado").style.display = "none";
                     document.getElementById("foldersList").innerHTML = "";
                     document.getElementById("btnDescargar").style.display = "none";
+                    refrescarBoveda();
                 } catch(e) {}
             }
 
@@ -583,15 +592,33 @@ def clean_dashboard():
                     if (data.folders && Object.keys(data.folders).length > 0) {
                         card.style.display = "block";
                         btnDescargar.style.display = "block";
-                        list.innerHTML = Object.entries(data.folders).map(([name, files]) => `
-                            <div class="folder-item">
-                                <div class="folder-name">📁 ${name}</div>
-                                <div class="folder-count">${files.length} fotos</div>
-                            </div>
-                        `).join("");
+                        list.innerHTML = Object.entries(data.folders).map(([name, files]) => {
+                            const cant = files.length;
+                            const label = cant === 1 ? "1 foto" : `${cant} fotos`;
+                            return `
+                                <div class="folder-item">
+                                    <div class="folder-name">📁 ${name}</div>
+                                    <div class="folder-count">${label}</div>
+                                </div>
+                            `;
+                        }).join("");
                     } else {
                         card.style.display = "none";
                         btnDescargar.style.display = "none";
+                    }
+                } catch(e) {}
+            }
+
+            async function refrescarBoveda() {
+                try {
+                    const res = await fetch("/api/boveda");
+                    const data = await res.json();
+                    const cardBoveda = document.getElementById("cardBoveda");
+                    const vaultDesc = document.getElementById("vaultDesc");
+                    if (data.count && data.count > 0) {
+                        cardBoveda.style.display = "block";
+                        const textoFotos = data.count === 1 ? "1 foto protegida" : `${data.count} fotos protegidas`;
+                        vaultDesc.innerText = `¿Borraste una foto por error en tu computadora? Tienes ${textoFotos} en la nube listas para recuperar.`;
                     }
                 } catch(e) {}
             }
@@ -614,7 +641,9 @@ def clean_dashboard():
 
             setInterval(refrescarEstado, 2000);
             setInterval(refrescarCarpetas, 3000);
+            setInterval(refrescarBoveda, 4000);
             refrescarCarpetas();
+            refrescarBoveda();
         </script>
     </body>
     </html>
