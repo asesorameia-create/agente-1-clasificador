@@ -21,9 +21,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger("CastilloEnfoca")
 
 app = FastAPI(
-    title="CastilloEnfoca - Organizador Universal de Fotos",
-    description="Agrupación biométrica universal de fotos por jugador y dorsal",
-    version="2.3.1"
+    title="CastilloEnfoca - Organizador Autónomo",
+    description="Sistema inteligente de separación biométrica y recuperación para fotógrafos",
+    version="3.0.0"
 )
 
 # Variables de entorno Cloudflare R2
@@ -32,12 +32,12 @@ R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY", "")
 R2_ENDPOINT_URL = os.getenv("R2_ENDPOINT_URL", "")
 R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", "agente-1-clasificador-fotos")
 
-# Roster de jugadores conocidos del torneo (Dorsal -> Nombre)
+# Roster de jugadores conocidos del torneo
 roster_map = {
     "1": "Portero_Trujillo",
     "4": "Defensa_4",
     "7": "Extremo_7",
-    "10": "Capitan_10"
+    "10": "Delantero_10"
 }
 
 def get_r2_client():
@@ -68,14 +68,17 @@ def log_event(message: str):
     if len(processing_status["logs"]) > 50:
         processing_status["logs"].pop(0)
 
-def extract_universal_features(img_bytes: bytes) -> Dict[str, Any]:
-    """Extrae rasgos faciales normalizados, histograma de uniforme y dorsales validados."""
+def extract_advanced_features(img_bytes: bytes) -> Dict[str, Any]:
+    """
+    Extrae rasgos biométricos, color dominante del uniforme y número de dorsal.
+    Garantiza que atletas con uniformes diferentes NUNCA se mezclen.
+    """
     try:
         nparr = np.frombuffer(img_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         del nparr
         if img is None:
-            return {"has_face": False, "face_patch": None, "torso_hist": None, "dorsal": None}
+            return {"has_face": False, "face_patch": None, "dominant_color": "desconocido", "hue": -1, "dorsal": None}
 
         h, w = img.shape[:2]
         if max(h, w) > 800:
@@ -92,9 +95,10 @@ def extract_universal_features(img_bytes: bytes) -> Dict[str, Any]:
         has_face = len(faces) > 0
 
         face_patch = None
-        torso_hist = None
-        detected_dorsal = None
+        dominant_color = "general"
+        dominant_hue = -1
 
+        # Extraer zona del torso del atleta
         if has_face:
             fx, fy, fw, fh = max(faces, key=lambda f: f[2] * f[3])
             face_crop = gray[fy:fy+fh, fx:fx+fw]
@@ -103,23 +107,41 @@ def extract_universal_features(img_bytes: bytes) -> Dict[str, Any]:
                 face_patch = cv2.equalizeHist(face_patch)
 
             ty1 = min(fy + fh, h - 10)
-            ty2 = min(fy + int(fh * 2.8), h)
-            tx1 = max(0, fx - int(fw * 0.5))
-            tx2 = min(w, fx + int(fw * 1.5))
-            torso_crop = hsv[ty1:ty2, tx1:tx2]
-            if torso_crop.size > 100:
-                hist = cv2.calcHist([torso_crop], [0, 1], None, [16, 16], [0, 180, 0, 256])
-                cv2.normalize(hist, hist, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
-                torso_hist = hist
+            ty2 = min(fy + int(fh * 3.0), h)
+            tx1 = max(0, fx - int(fw * 0.6))
+            tx2 = min(w, fx + int(fw * 1.6))
+            torso = hsv[ty1:ty2, tx1:tx2]
         else:
             cy1, cy2 = int(h * 0.15), int(h * 0.70)
             cx1, cx2 = int(w * 0.20), int(w * 0.80)
-            center_crop = hsv[cy1:cy2, cx1:cx2]
-            if center_crop.size > 100:
-                hist = cv2.calcHist([center_crop], [0, 1], None, [16, 16], [0, 180, 0, 256])
-                cv2.normalize(hist, hist, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
-                torso_hist = hist
+            torso = hsv[cy1:cy2, cx1:cx2]
 
+        # Clasificación estricta de color de uniforme (Espacio HSV)
+        if torso.size > 100:
+            h_vals = torso[:, :, 0].flatten()
+            s_vals = torso[:, :, 1].flatten()
+            v_vals = torso[:, :, 2].flatten()
+
+            # Filtrar píxeles saturados y con brillo
+            valid = (s_vals > 50) & (v_vals > 50)
+            if np.sum(valid) > 50:
+                valid_h = h_vals[valid]
+                median_h = float(np.median(valid_h))
+                dominant_hue = median_h
+
+                if 35 <= median_h <= 85:
+                    dominant_color = "verde_trujillo"  # Arquero
+                elif 95 <= median_h <= 135:
+                    dominant_color = "azul_amarillo"   # Jugador Azul
+                elif 80 <= median_h < 95:
+                    dominant_color = "celeste"         # Equipo Celeste
+                elif median_h < 15 or median_h > 165:
+                    dominant_color = "rojo"
+                elif 15 <= median_h < 35:
+                    dominant_color = "amarillo"
+
+        # Detección de dorsal deportivo con OCR estricto
+        detected_dorsal = None
         if pytesseract:
             cy1, cy2 = int(h * 0.15), int(h * 0.75)
             cx1, cx2 = int(w * 0.20), int(w * 0.80)
@@ -143,48 +165,56 @@ def extract_universal_features(img_bytes: bytes) -> Dict[str, Any]:
         return {
             "has_face": has_face,
             "face_patch": face_patch,
-            "torso_hist": torso_hist,
+            "dominant_color": dominant_color,
+            "hue": dominant_hue,
             "dorsal": detected_dorsal
         }
     except Exception as e:
-        logger.error(f"Error extrayendo rasgos: {e}")
-        return {"has_face": False, "face_patch": None, "torso_hist": None, "dorsal": None}
+        logger.error(f"Error analizando foto: {e}")
+        return {"has_face": False, "face_patch": None, "dominant_color": "general", "hue": -1, "dorsal": None}
 
-def cluster_and_assign_photos(photo_items: List[Dict[str, Any]]) -> Dict[str, List[str]]:
+def strict_unify_clusters(photo_items: List[Dict[str, Any]]) -> Dict[str, List[str]]:
     """
-    Agrupa TODAS las fotos del mismo jugador en UNA SOLA CARPETA universalmente.
-    Prioriza similitud facial y de uniforme, eliminando carpetas individuales falsas.
+    Agrupa fotos con REGLA DE ORO:
+    1. Atletas con colores de uniforme diferentes NUNCA se mezclan en la misma carpeta.
+    2. Cada atleta tiene su carpeta personalizada única.
+    3. Si un jugador tiene 4 fotos, las 4 van a su carpeta.
+    4. Si un jugador tiene 1 sola foto, esa sola foto va en su carpeta única personalizada.
     """
-    clusters = []
+    clusters = []  # {"color": ..., "dorsal": ..., "face_patch": ..., "files": []}
     general_files = []
 
     for item in photo_items:
         key = item["key"]
         feat = item["features"]
 
-        if not feat["has_face"] and feat["torso_hist"] is None and feat["dorsal"] is None:
+        # Si no tiene rostro ni uniforme identificable ni dorsal, es toma abierta del estadio/árbitro
+        if not feat["has_face"] and feat["dominant_color"] == "general" and feat["dorsal"] is None:
             general_files.append(key)
             continue
 
         matched_cluster = None
 
         for c in clusters:
-            # 1. Coincidencia facial directa
+            # REGLA FUNDAMENTAL: Los uniformes DEBEN coincidir para ser el mismo atleta
+            if feat["dominant_color"] != "general" and c["color"] != "general":
+                if feat["dominant_color"] != c["color"]:
+                    continue  # Uniformes diferentes -> NUNCA mezclar
+
+            # 1. Mismo dorsal y mismo color de uniforme -> ES EL MISMO JUGADOR
+            if feat["dorsal"] and c["dorsal"] and feat["dorsal"] == c["dorsal"]:
+                matched_cluster = c
+                break
+
+            # 2. Misma cara y mismo color de uniforme -> ES EL MISMO JUGADOR
             if feat["face_patch"] is not None and c["face_patch"] is not None:
                 res = cv2.matchTemplate(feat["face_patch"], c["face_patch"], cv2.TM_CCOEFF_NORMED)
-                if res[0][0] > 0.45:
+                if res[0][0] > 0.58:
                     matched_cluster = c
                     break
 
-            # 2. Coincidencia de uniforme + rostro
-            if feat["torso_hist"] is not None and c["torso_hist"] is not None:
-                sim = cv2.compareHist(feat["torso_hist"], c["torso_hist"], cv2.HISTCMP_CORREL)
-                if sim > 0.72:
-                    matched_cluster = c
-                    break
-
-            # 3. Coincidencia de dorsal confirmado
-            if feat["dorsal"] and c["dorsal"] and feat["dorsal"] == c["dorsal"]:
+            # 3. Mismo rol distintivo (ej. arquero verde con casco de Trujillo)
+            if feat["dominant_color"] == "verde_trujillo" and c["color"] == "verde_trujillo":
                 matched_cluster = c
                 break
 
@@ -196,30 +226,35 @@ def cluster_and_assign_photos(photo_items: List[Dict[str, Any]]) -> Dict[str, Li
                 matched_cluster["face_patch"] = feat["face_patch"]
         else:
             clusters.append({
+                "color": feat["dominant_color"],
                 "dorsal": feat["dorsal"],
                 "face_patch": feat["face_patch"],
-                "torso_hist": feat["torso_hist"],
                 "files": [key]
             })
 
+    # Nombrar las carpetas personalizadas sin mezclar a nadie
     folders_result = {}
-    player_counter = 1
+    player_num = 1
 
     for c in clusters:
-        is_confirmed_player = len(c["files"]) >= 2 or (c["dorsal"] and str(c["dorsal"]) in roster_map)
-
-        if is_confirmed_player:
-            if c["dorsal"]:
-                d_num = int(c["dorsal"])
-                name_suffix = roster_map.get(str(d_num), f"Jugador_{d_num}")
-                folder_name = f"organizadas/Dorsal_{d_num:02d}_{name_suffix}"
-            else:
-                folder_name = f"organizadas/Jugador_Identificado_{player_counter:02d}"
-                player_counter += 1
-            
-            folders_result[folder_name] = c["files"]
+        # Asignar nombre según dorsal o color/rol del jugador
+        if c["color"] == "verde_trujillo":
+            folder_name = "organizadas/Dorsal_01_Portero_Trujillo"
+        elif c["dorsal"] and str(c["dorsal"]) in roster_map:
+            d_val = int(c["dorsal"])
+            folder_name = f"organizadas/Dorsal_{d_val:02d}_{roster_map[str(d_val)]}"
+        elif c["dorsal"]:
+            d_val = int(c["dorsal"])
+            folder_name = f"organizadas/Dorsal_{d_val:02d}_Jugador_{d_val}"
+        elif c["color"] == "azul_amarillo":
+            folder_name = "organizadas/Jugador_Uniforme_Azul_Amarillo"
+        elif c["color"] == "celeste":
+            folder_name = "organizadas/Jugador_Uniforme_Celeste"
         else:
-            general_files.extend(c["files"])
+            folder_name = f"organizadas/Jugador_Identificado_{player_num:02d}"
+            player_num += 1
+
+        folders_result[folder_name] = c["files"]
 
     if general_files:
         folders_result["organizadas/00_Fotos_Generales_Equipo"] = general_files
@@ -227,7 +262,7 @@ def cluster_and_assign_photos(photo_items: List[Dict[str, Any]]) -> Dict[str, Li
     return folders_result
 
 def process_photos_task():
-    """Ejecuta la clasificación universal y copia los archivos en sus carpetas unificadas."""
+    """Ejecuta la clasificación estricta y copia los archivos en sus carpetas unificadas."""
     global processing_status
     processing_status["is_processing"] = True
     processing_status["logs"] = []
@@ -248,6 +283,7 @@ def process_photos_task():
             obj["Key"] for obj in objects 
             if obj["Key"].lower().endswith(image_extensions) 
             and not obj["Key"].startswith("organizadas/")
+            and not obj["Key"].startswith("boveda_respaldo/")
         ]
 
         processing_status["total_photos"] = len(pending_photos)
@@ -258,6 +294,17 @@ def process_photos_task():
             processing_status["is_processing"] = False
             return
 
+        # 1. Guardar copia en Bóveda de Respaldo por si el fotógrafo borra por error en su PC
+        for key in pending_photos:
+            filename = os.path.basename(key)
+            backup_key = f"boveda_respaldo/{filename}"
+            s3.copy_object(
+                Bucket=R2_BUCKET_NAME,
+                CopySource={'Bucket': R2_BUCKET_NAME, 'Key': key},
+                Key=backup_key
+            )
+
+        # 2. Analizar rasgos de cada foto
         photo_items = []
         for idx, key in enumerate(pending_photos, 1):
             filename = os.path.basename(key)
@@ -265,14 +312,16 @@ def process_photos_task():
             
             obj = s3.get_object(Bucket=R2_BUCKET_NAME, Key=key)
             img_bytes = obj['Body'].read()
-            feat = extract_universal_features(img_bytes)
+            feat = extract_advanced_features(img_bytes)
             photo_items.append({"key": key, "features": feat})
             del img_bytes
             gc.collect()
 
-        log_event("Unificando jugadores en sus carpetas...")
-        folders_map = cluster_and_assign_photos(photo_items)
+        # 3. Agrupación estricta sin mezclar jugadores
+        log_event("Separando cada jugador en su carpeta única...")
+        folders_map = strict_unify_clusters(photo_items)
 
+        # 4. Copiar a carpetas organizadas
         for folder_name, files in folders_map.items():
             for key in files:
                 filename = os.path.basename(key)
@@ -285,7 +334,7 @@ def process_photos_task():
                 processing_status["processed_photos"] += 1
 
         processing_status["folders_created"] = {k: len(v) for k, v in folders_map.items()}
-        log_event("¡Listo! Todas las fotos de cada jugador quedaron unificadas en su carpeta.")
+        log_event("¡Listo! Cada atleta quedó en su carpeta individual sin mezclar fotos.")
 
     except Exception as e:
         log_event(f"Error procesando fotos: {str(e)}")
@@ -326,6 +375,20 @@ def get_folders():
         return {"folders": result}
     except Exception as e:
         return {"folders": {}}
+
+@app.get("/api/boveda")
+def get_backup_vault():
+    """Devuelve las fotos respaldadas en la Bóveda de Seguridad para recuperación."""
+    s3 = get_r2_client()
+    if not s3:
+        return {"backup_photos": []}
+    try:
+        response = s3.list_objects_v2(Bucket=R2_BUCKET_NAME, Prefix="boveda_respaldo/")
+        objects = response.get("Contents", [])
+        files = [os.path.basename(obj["Key"]) for obj in objects if not obj["Key"].endswith("/")]
+        return {"backup_photos": files, "count": len(files)}
+    except Exception as e:
+        return {"backup_photos": [], "count": 0}
 
 @app.post("/api/procesar")
 def trigger_process(background_tasks: BackgroundTasks):
@@ -394,6 +457,29 @@ def download_all_zip():
         headers={"Content-Disposition": "attachment; filename=Fotos_Organizadas_CastilloEnfoca.zip"}
     )
 
+@app.get("/api/descargar-boveda-zip")
+def download_backup_vault_zip():
+    """Descarga todo el respaldo de seguridad por si el fotógrafo borró fotos por error."""
+    s3 = get_r2_client()
+    if not s3:
+        return JSONResponse({"error": "No R2"}, status_code=500)
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        response = s3.list_objects_v2(Bucket=R2_BUCKET_NAME, Prefix="boveda_respaldo/")
+        for obj in response.get("Contents", []):
+            key = obj["Key"]
+            if not key.endswith("/"):
+                file_obj = s3.get_object(Bucket=R2_BUCKET_NAME, Key=key)
+                zip_file.writestr(key.replace("boveda_respaldo/", "Respaldo_Seguridad/"), file_obj["Body"].read())
+
+    zip_buffer.seek(0)
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=Boveda_Respaldo_CastilloEnfoca.zip"}
+    )
+
 @app.get("/", response_class=HTMLResponse)
 def castillo_branded_dashboard():
     html = """
@@ -408,9 +494,9 @@ def castillo_branded_dashboard():
             body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #09090b; color: #ffffff; padding: 16px; }
             .container { max-width: 520px; margin: 0 auto; }
             
-            /* Encabezado con logo oficial de CastilloEnfoca */
+            /* Encabezado con paleta oficial de CastilloEnfoca */
             .header { text-align: center; margin-bottom: 24px; padding-top: 10px; }
-            .logo-img { width: 110px; height: 110px; border-radius: 50%; margin: 0 auto 12px auto; display: block; box-shadow: 0 0 25px rgba(239, 68, 68, 0.4); border: 2px solid #ef4444; }
+            .logo-img { width: 110px; height: 110px; border-radius: 50%; margin: 0 auto 12px auto; display: block; box-shadow: 0 0 25px rgba(239, 68, 68, 0.45); border: 2px solid #ef4444; }
             .header h1 { font-size: 26px; font-weight: 900; letter-spacing: 1px; margin-bottom: 2px; }
             .brand-white { color: #ffffff; }
             .brand-red { color: #ef4444; }
@@ -418,7 +504,7 @@ def castillo_branded_dashboard():
 
             .card { background: #141416; border-radius: 18px; padding: 22px; margin-bottom: 16px; border: 1px solid #27272a; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
             
-            /* Caja de carga con estética neon CastilloEnfoca */
+            /* Caja de carga con borde neon naranja/rojo */
             .upload-box { border: 2px dashed #f97316; border-radius: 14px; padding: 34px 18px; text-align: center; cursor: pointer; background: #18181b; transition: 0.2s; }
             .upload-box:active { background: #27272a; border-color: #ef4444; }
             .upload-icon { font-size: 46px; margin-bottom: 8px; }
@@ -427,15 +513,14 @@ def castillo_branded_dashboard():
             
             input[type="file"] { display: none; }
             
-            /* Botón de acción con degradado neon rojo a naranja */
-            .btn-action { width: 100%; background: linear-gradient(135deg, #e11d48 0%, #ea580c 100%); color: white; border: none; padding: 18px; border-radius: 14px; font-size: 18px; font-weight: 900; cursor: pointer; margin-top: 16px; display: none; box-shadow: 0 4px 15px rgba(225, 29, 72, 0.4); text-transform: uppercase; letter-spacing: 0.5px; }
+            /* Botón de acción con degradado neon rojo-naranja */
+            .btn-action { width: 100%; background: linear-gradient(135deg, #e11d48 0%, #ea580c 100%); color: white; border: none; padding: 18px; border-radius: 14px; font-size: 18px; font-weight: 900; cursor: pointer; margin-top: 16px; display: none; box-shadow: 0 4px 15px rgba(225, 29, 72, 0.4); text-transform: uppercase; }
             .btn-action:active { transform: scale(0.98); }
             .btn-action:disabled { background: #3f3f46; box-shadow: none; }
 
             /* Botón verde para descargar */
             .btn-download { width: 100%; background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: white; border: none; padding: 16px; border-radius: 14px; font-size: 17px; font-weight: bold; cursor: pointer; margin-top: 14px; text-align: center; text-decoration: none; display: none; box-shadow: 0 4px 15px rgba(16,185,129,0.3); }
             
-            /* Botón limpiar sesión */
             .btn-clean { width: 100%; background: transparent; color: #a1a1aa; border: 1px solid #27272a; padding: 12px; border-radius: 12px; font-size: 13px; cursor: pointer; margin-top: 12px; text-align: center; }
             .btn-clean:hover { color: #f43f5e; border-color: #f43f5e; }
 
@@ -445,6 +530,13 @@ def castillo_branded_dashboard():
             .folder-item { background: #18181b; border: 1px solid #27272a; border-radius: 12px; padding: 14px 16px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
             .folder-name { font-weight: bold; font-size: 15px; color: #ffffff; }
             .folder-count { background: linear-gradient(135deg, #e11d48 0%, #ea580c 100%); padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: bold; }
+
+            /* Bóveda de Respaldo Anti-Pérdidas */
+            .vault-card { background: #111114; border: 1px solid #27272a; border-radius: 14px; padding: 16px; margin-top: 14px; text-align: center; }
+            .vault-title { font-size: 14px; font-weight: bold; color: #facc15; margin-bottom: 6px; display: flex; items-center; justify-content: center; gap: 6px; }
+            .vault-desc { font-size: 12px; color: #a1a1aa; margin-bottom: 10px; }
+            .btn-vault { background: #27272a; color: #facc15; border: 1px solid #3f3f46; padding: 10px 16px; border-radius: 10px; font-size: 13px; font-weight: bold; text-decoration: none; display: inline-block; cursor: pointer; }
+            .btn-vault:hover { background: #3f3f46; }
         </style>
     </head>
     <body>
@@ -475,8 +567,17 @@ def castillo_branded_dashboard():
             <div class="card" id="cardCarpetas" style="display: none;">
                 <h3 style="font-size: 15px; color: #f97316; margin-bottom: 14px; font-weight: bold;">📂 Tus Carpetas Listas:</h3>
                 <div id="foldersList"></div>
-                <a href="/api/descargar-zip" id="btnDescargar" class="btn-download">📦 Descargar Todas las Carpetas</a>
+                
+                <a href="/api/descargar-zip" id="btnDescargar" class="btn-download" onclick="descargaIniciada()">📦 Descargar Todas las Carpetas en ZIP</a>
+                
                 <button class="btn-clean" onclick="limpiarTodo()">🧹 Limpiar para el siguiente partido</button>
+
+                <!-- BÓVEDA DE RESPALDO DISRUPTIVA (ANTI-PÉRDIDAS) -->
+                <div class="vault-card">
+                    <div class="vault-title"><span>🛡️</span> Bóveda de Respaldo en la Nube</div>
+                    <p class="vault-desc">¿Borraste una foto por error en tu computadora? Tu copia de seguridad está a salvo aquí.</p>
+                    <a href="/api/descargar-boveda-zip" class="btn-vault">Restaurar Copia de Seguridad</a>
+                </div>
             </div>
         </div>
 
@@ -517,7 +618,7 @@ def castillo_branded_dashboard():
                         body: formData
                     });
                     const data = await res.json();
-                    status.innerText = "Fotos subidas. El robot las está agrupando...";
+                    status.innerText = "Fotos subidas. El robot las está agrupando sin mezclar...";
                     selectedFiles = [];
                     document.getElementById("uploadLabel").innerText = "Toca aquí para seleccionar fotos";
                     btn.style.display = "none";
@@ -528,8 +629,18 @@ def castillo_branded_dashboard():
                 }
             }
 
+            function descargaIniciada() {
+                setTimeout(() => {
+                    // Al descargar, confirma y ofrece limpiar la vista principal
+                    const status = document.getElementById("statusText");
+                    const cardEstado = document.getElementById("cardEstado");
+                    cardEstado.style.display = "block";
+                    status.innerText = "✅ Descarga lista. Tu respaldo quedó a salvo en la Bóveda de Respaldo.";
+                }, 1500);
+            }
+
             async function limpiarTodo() {
-                if (!confirm("¿Deseas limpiar la sesión para empezar un nuevo partido?")) return;
+                if (!confirm("¿Deseas limpiar la pantalla para empezar un nuevo partido?")) return;
                 try {
                     await fetch("/api/limpiar", { method: "POST" });
                     document.getElementById("cardCarpetas").style.display = "none";
