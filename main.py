@@ -2,10 +2,11 @@ import os
 import io
 import gc
 import re
+import zipfile
 import logging
 from typing import List, Dict, Any
-from fastapi import FastAPI, BackgroundTasks, Form
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, BackgroundTasks, UploadFile, File, Form
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 import boto3
 from botocore.config import Config
 import numpy as np
@@ -21,9 +22,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger("Agente1-Clasificador")
 
 app = FastAPI(
-    title="Agente 1: El Clasificador Inteligente de Fotos",
-    description="Sistema autónomo de detección biométrica por rostros y dorsales deportivos",
-    version="1.2.0"
+    title="Agente 1: El Asistente Móvil del Fotógrafo",
+    description="Sube fotos desordenadas desde el celular y las clasifica automáticamente en carpetas por dorsal y jugador",
+    version="2.0.0"
 )
 
 # Variables de entorno para Cloudflare R2
@@ -32,14 +33,14 @@ R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY", "")
 R2_ENDPOINT_URL = os.getenv("R2_ENDPOINT_URL", "")
 R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", "agente-1-clasificador-fotos")
 
-# Nómina de jugadores en memoria (Dorsal -> Nombre del Jugador)
+# Nómina de jugadores por defecto
 roster_config = {
     "1": "Portero_Trujillo",
     "10": "Capitan_10"
 }
 
 def get_r2_client():
-    """Retorna un cliente boto3 configurado para Cloudflare R2."""
+    """Retorna cliente boto3 para Cloudflare R2."""
     if not R2_ACCESS_KEY_ID or not R2_SECRET_ACCESS_KEY or not R2_ENDPOINT_URL:
         return None
     return boto3.client(
@@ -56,6 +57,7 @@ processing_status = {
     "last_run": None,
     "total_photos": 0,
     "processed_photos": 0,
+    "current_action": "Listo para recibir fotos",
     "folders_created": {},
     "logs": []
 }
@@ -63,11 +65,12 @@ processing_status = {
 def log_event(message: str):
     logger.info(message)
     processing_status["logs"].append(message)
+    processing_status["current_action"] = message
     if len(processing_status["logs"]) > 100:
         processing_status["logs"].pop(0)
 
 def detect_player_and_dorsal(img_bytes: bytes, current_roster: Dict[str, str]) -> Dict[str, Any]:
-    """Detecta rostro, dorsal numérico y texto deportivo en memoria de forma ultra-ligera."""
+    """Detecta rostro y dorsal numérico en memoria con bajo consumo de RAM."""
     try:
         nparr = np.frombuffer(img_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -87,12 +90,11 @@ def detect_player_and_dorsal(img_bytes: bytes, current_roster: Dict[str, str]) -
 
         faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(25, 25))
         has_faces = len(faces) > 0
-        sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
 
         detected_number = None
         detected_text = ""
-
         crops = []
+
         if has_faces:
             for (fx, fy, fw, fh) in faces[:2]:
                 torso_y = min(fy + fh, h - 10)
@@ -102,7 +104,6 @@ def detect_player_and_dorsal(img_bytes: bytes, current_roster: Dict[str, str]) -
                 if torso_h > 30 and torso_w > 30:
                     crops.append(gray[torso_y:torso_y+torso_h, torso_x:torso_x+torso_w])
 
-        # Zona central para espaldas o dorsales prominentes
         cy1, cy2 = int(h * 0.15), int(h * 0.75)
         cx1, cx2 = int(w * 0.15), int(w * 0.85)
         crops.append(gray[cy1:cy2, cx1:cx2])
@@ -111,7 +112,6 @@ def detect_player_and_dorsal(img_bytes: bytes, current_roster: Dict[str, str]) -
             for crop in crops:
                 if crop.size == 0:
                     continue
-                
                 clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
                 enhanced = clahe.apply(crop)
                 _, thresh = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -145,22 +145,21 @@ def detect_player_and_dorsal(img_bytes: bytes, current_roster: Dict[str, str]) -
         return {
             "has_faces": has_faces,
             "dorsal": detected_number,
-            "player_name": player_name,
-            "sharpness": round(float(sharpness), 2)
+            "player_name": player_name
         }
     except Exception as e:
-        logger.error(f"Error en detección: {e}")
-        return {"has_faces": False, "dorsal": None, "player_name": None, "sharpness": 0}
+        logger.error(f"Error detectando: {e}")
+        return {"has_faces": False, "dorsal": None, "player_name": None}
 
 def process_photos_task(custom_roster: Dict[str, str] = None):
-    """Procesamiento con clasificación por carpetas nombradas (Dorsal + Nombre)."""
+    """Clasifica todas las fotos pendientes en carpetas por dorsal y nombre."""
     global processing_status, roster_config
     if custom_roster:
         roster_config.update(custom_roster)
 
     processing_status["is_processing"] = True
     processing_status["logs"] = []
-    log_event("Iniciando escaneo del baúl de Cloudflare R2...")
+    log_event("Analizando las fotos del partido...")
 
     s3 = get_r2_client()
     if not s3:
@@ -181,20 +180,19 @@ def process_photos_task(custom_roster: Dict[str, str] = None):
 
         processing_status["total_photos"] = len(pending_photos)
         processing_status["processed_photos"] = 0
-        log_event(f"Se encontraron {len(pending_photos)} fotos originales para clasificar.")
+        log_event(f"Se encontraron {len(pending_photos)} fotos para organizar.")
 
         if not pending_photos:
-            log_event("No hay fotos pendientes de clasificar.")
+            log_event("No hay fotos nuevas pendientes.")
             processing_status["is_processing"] = False
             return
 
         folders_map = {}
-        # Historial de jugadores detectados en la sesión para asignar fotos de acción frontal
         last_identified_folder = None
 
         for idx, key in enumerate(pending_photos, 1):
             filename = os.path.basename(key)
-            log_event(f"[{idx}/{len(pending_photos)}] Analizando: {filename}...")
+            log_event(f"[{idx}/{len(pending_photos)}] Identificando: {filename}...")
             
             obj = s3.get_object(Bucket=R2_BUCKET_NAME, Key=key)
             img_bytes = obj['Body'].read()
@@ -203,21 +201,18 @@ def process_photos_task(custom_roster: Dict[str, str] = None):
             del img_bytes
             gc.collect()
 
-            # Lógica de carpetas personalizadas por dorsal y nombre:
             if features["dorsal"]:
                 d_num = int(features["dorsal"])
                 name_tag = features["player_name"] or roster_config.get(str(d_num), f"Jugador_{d_num}")
                 folder_name = f"organizadas/Dorsal_{d_num:02d}_{name_tag}"
                 last_identified_folder = folder_name
             elif features["has_faces"]:
-                # Si tiene rostro pero el dorsal no es visible de frente, agrupar con el jugador en juego
                 folder_name = last_identified_folder or f"organizadas/Dorsal_01_{roster_config.get('1', 'Portero_Trujillo')}"
             else:
                 folder_name = "organizadas/00_Fotos_Generales_Equipo"
 
             destination_key = f"{folder_name}/{filename}"
 
-            # Copiar en Cloudflare R2 directamente
             s3.copy_object(
                 Bucket=R2_BUCKET_NAME,
                 CopySource={'Bucket': R2_BUCKET_NAME, 'Key': key},
@@ -226,147 +221,249 @@ def process_photos_task(custom_roster: Dict[str, str] = None):
 
             folders_map.setdefault(folder_name, []).append(filename)
             processing_status["processed_photos"] += 1
-            log_event(f"-> Foto '{filename}' guardada en carpeta: {folder_name}")
 
         processing_status["folders_created"] = {k: len(v) for k, v in folders_map.items()}
-        log_event("¡Clasificación completada al 100%! Todas las carpetas por jugador están listas.")
+        log_event("¡Listo! Todas las carpetas por jugador están organizadas.")
 
     except Exception as e:
-        log_event(f"Error durante el procesamiento: {str(e)}")
+        log_event(f"Error procesando fotos: {str(e)}")
     finally:
         processing_status["is_processing"] = False
         gc.collect()
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "Agente 1 - Clasificador con Dorsales y Nombres"}
+    return {"status": "ok", "service": "Agente 1 - Asistente Fotografo Móvil"}
 
 @app.get("/api/estado")
 def get_status():
     return processing_status
 
-@app.post("/api/procesar")
-def trigger_process(background_tasks: BackgroundTasks, nomina: str = Form(default="")):
-    if processing_status["is_processing"]:
-        return JSONResponse({"status": "busy", "message": "Ya hay un proceso en marcha."})
+@app.get("/api/carpetas")
+def get_folders():
+    """Devuelve las carpetas organizadas y la lista de fotos en cada una."""
+    s3 = get_r2_client()
+    if not s3:
+        return {"folders": {}}
     
-    parsed_roster = {}
-    if nomina:
-        for line in nomina.splitlines():
-            line = line.strip()
-            if "=" in line:
-                k, v = line.split("=", 1)
-                parsed_roster[k.strip()] = v.strip().replace(" ", "_")
-            elif ":" in line:
-                k, v = line.split(":", 1)
-                parsed_roster[k.strip()] = v.strip().replace(" ", "_")
+    try:
+        response = s3.list_objects_v2(Bucket=R2_BUCKET_NAME, Prefix="organizadas/")
+        objects = response.get("Contents", [])
+        
+        result = {}
+        for obj in objects:
+            key = obj["Key"]
+            parts = key.split("/")
+            if len(parts) >= 3:
+                folder_name = parts[1]
+                filename = parts[2]
+                result.setdefault(folder_name, []).append(filename)
+                
+        return {"folders": result}
+    except Exception as e:
+        return {"error": str(e), "folders": {}}
 
-    background_tasks.add_task(process_photos_task, parsed_roster)
-    return {"status": "started", "message": "Proceso de clasificación iniciado con éxito."}
+@app.post("/api/subir-y-procesar")
+async def upload_and_process(background_tasks: BackgroundTasks, files: List[UploadFile] = File(...)):
+    """Sube fotos desordenadas directamente desde el teléfono y arranca la IA."""
+    s3 = get_r2_client()
+    if not s3:
+        return JSONResponse({"error": "Cloudflare R2 no conectado."}, status_code=500)
+
+    count = 0
+    for file in files:
+        if file.filename:
+            # Subir directamente al baúl en la raíz (desordenadas)
+            s3.upload_fileobj(file.file, R2_BUCKET_NAME, file.filename)
+            count += 1
+
+    # Iniciar clasificación en segundo plano de inmediato
+    background_tasks.add_task(process_photos_task)
+    return {"status": "ok", "uploaded": count, "message": f"{count} fotos subidas. La IA ya las está organizando."}
+
+@app.get("/api/descargar-zip")
+def download_all_zip():
+    """Empaqueta todas las carpetas organizadas en un archivo ZIP para descarga directa."""
+    s3 = get_r2_client()
+    if not s3:
+        return JSONResponse({"error": "No R2"}, status_code=500)
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        response = s3.list_objects_v2(Bucket=R2_BUCKET_NAME, Prefix="organizadas/")
+        for obj in response.get("Contents", []):
+            key = obj["Key"]
+            if not key.endswith("/"):
+                file_obj = s3.get_object(Bucket=R2_BUCKET_NAME, Key=key)
+                zip_file.writestr(key.replace("organizadas/", ""), file_obj["Body"].read())
+
+    zip_buffer.seek(0)
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=Fotos_Organizadas_CastilloEnfoca.zip"}
+    )
 
 @app.get("/", response_class=HTMLResponse)
-def dashboard():
-    has_keys = bool(R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY and R2_ENDPOINT_URL)
-    status_badge = '<span style="color:#10b981;font-weight:bold;">Conectado a Cloudflare R2</span>' if has_keys else '<span style="color:#ef4444;font-weight:bold;">Pendiente configurar Llaves R2</span>'
-    
-    html = f"""
+def mobile_friendly_dashboard():
+    html = """
     <!DOCTYPE html>
     <html lang="es">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Agente 1: Clasificador de Fotos por Dorsal y Nombre</title>
+        <title>CastilloEnfoca - Clasificador de Fotos</title>
         <style>
-            body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 20px; }}
-            .container {{ max-width: 900px; margin: 0 auto; }}
-            .header {{ background: #1e293b; padding: 24px; border-radius: 12px; border: 1px solid #334155; margin-bottom: 20px; }}
-            h1 {{ margin: 0 0 8px 0; font-size: 24px; color: #38bdf8; }}
-            p.subtitle {{ margin: 0; color: #94a3b8; font-size: 14px; }}
-            .card {{ background: #1e293b; padding: 20px; border-radius: 12px; border: 1px solid #334155; margin-bottom: 20px; }}
-            .btn {{ background: #0284c7; color: white; border: none; padding: 14px 28px; border-radius: 8px; font-weight: bold; cursor: pointer; font-size: 16px; transition: 0.2s; }}
-            .btn:hover {{ background: #0369a1; }}
-            .btn:disabled {{ background: #475569; cursor: not-allowed; }}
-            .log-box {{ background: #090d16; border: 1px solid #1e293b; padding: 15px; border-radius: 8px; height: 260px; overflow-y: auto; font-family: monospace; font-size: 13px; color: #38bdf8; }}
-            .badge {{ display: inline-block; padding: 4px 10px; border-radius: 9999px; font-size: 12px; background: #334155; }}
-            textarea {{ width: 100%; box-sizing: border-box; background: #090d16; color: #38bdf8; border: 1px solid #334155; border-radius: 8px; padding: 10px; font-family: monospace; font-size: 13px; margin: 10px 0; }}
-            .folder-badge {{ background: #0369a1; color: white; padding: 6px 12px; border-radius: 6px; font-size: 13px; margin: 4px; display: inline-block; }}
+            * { box-sizing: border-box; margin: 0; padding: 0; }
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0b1329; color: #ffffff; padding: 16px; }
+            .container { max-width: 600px; margin: 0 auto; }
+            
+            .header { text-align: center; margin-bottom: 24px; padding-top: 10px; }
+            .header h1 { font-size: 24px; color: #38bdf8; margin-bottom: 6px; }
+            .header p { color: #94a3b8; font-size: 14px; }
+
+            .step-card { background: #1e293b; border-radius: 16px; padding: 20px; margin-bottom: 20px; border: 1px solid #334155; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+            .step-title { font-size: 16px; font-weight: bold; color: #38bdf8; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+            
+            /* Botón grande para celular */
+            .upload-box { border: 2px dashed #38bdf8; border-radius: 12px; padding: 30px 15px; text-align: center; cursor: pointer; background: #0f172a; transition: 0.2s; }
+            .upload-box:active { background: #1e293b; }
+            .upload-icon { font-size: 42px; margin-bottom: 8px; }
+            .upload-text { font-size: 16px; font-weight: bold; color: #f8fafc; }
+            .upload-hint { font-size: 13px; color: #94a3b8; margin-top: 4px; }
+            
+            input[type="file"] { display: none; }
+            
+            .btn-action { width: 100%; background: #0284c7; color: white; border: none; padding: 16px; border-radius: 12px; font-size: 18px; font-weight: bold; cursor: pointer; margin-top: 15px; display: none; }
+            .btn-action:active { background: #0369a1; }
+            .btn-action:disabled { background: #475569; cursor: not-allowed; }
+
+            .btn-download { width: 100%; background: #10b981; color: white; border: none; padding: 16px; border-radius: 12px; font-size: 17px; font-weight: bold; cursor: pointer; margin-top: 15px; text-align: center; text-decoration: none; display: block; box-shadow: 0 4px 12px rgba(16,185,129,0.3); }
+            
+            .status-box { background: #090d16; border-radius: 10px; padding: 14px; font-family: monospace; font-size: 13px; color: #38bdf8; min-height: 50px; }
+            
+            .folder-item { background: #0f172a; border: 1px solid #334155; border-radius: 10px; padding: 14px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
+            .folder-name { font-weight: bold; font-size: 15px; color: #f8fafc; }
+            .folder-count { background: #0369a1; padding: 4px 10px; border-radius: 20px; font-size: 12px; }
         </style>
     </head>
     <body>
         <div class="container">
             <div class="header">
-                <h1>🤖 Agente 1: Clasificador por Dorsal y Nombre</h1>
-                <p class="subtitle">Organización autónoma de fotos en carpetas individuales por jugador</p>
-                <div style="margin-top: 15px;">
-                    <span class="badge">Estado: {status_badge}</span>
-                    <span class="badge">Baúl R2: {R2_BUCKET_NAME}</span>
-                </div>
+                <h1>📸 CastilloEnfoca</h1>
+                <p>Tu Asistente Inteligente de Clasificación</p>
             </div>
 
-            <div class="card">
-                <h2>Panel de Control del Fotógrafo</h2>
-                <p style="color: #cbd5e1; font-size: 14px;">
-                    Escribe o pega aquí la nómina del partido (ejemplo: <code>1 = Portero_Trujillo</code> o <code>10 = Juan_Perez</code>). Si no pones nada, el robot le pondrá el dorsal detectado automáticamente.
-                </p>
-                <textarea id="nominaInput" rows="3" placeholder="1 = Portero_Trujillo&#10;10 = Juan_Perez">1 = Portero_Trujillo&#10;10 = Delantero</textarea>
-                <br>
-                <button id="btnProcesar" class="btn" onclick="iniciarProcesamiento()">🚀 Iniciar Clasificación en Carpetas por Jugador</button>
+            <!-- PASO 1: SUBIR FOTOS DESDE EL CELULAR -->
+            <div class="step-card">
+                <div class="step-title"><span>1️⃣</span> Toca para elegir tus fotos desordenadas</div>
+                <div class="upload-box" onclick="document.getElementById('fileInput').click()">
+                    <div class="upload-icon">📁</div>
+                    <div class="upload-text" id="uploadLabel">Toca aquí para seleccionar las fotos</div>
+                    <div class="upload-hint">Puedes seleccionar 10, 50 o 500 fotos juntas</div>
+                </div>
+                <input type="file" id="fileInput" multiple accept="image/*" onchange="fotosSeleccionadas(event)">
+                
+                <button id="btnSubir" class="btn-action" onclick="subirFotos()">🚀 Subir y Organizar con IA</button>
             </div>
 
-            <div class="card">
-                <h3>Carpetas Creadas por el Robot:</h3>
-                <div id="foldersBox" style="min-height: 40px; margin-bottom: 15px;">
-                    <span style="color: #64748b; font-size: 14px;">Las carpetas aparecerán aquí tan pronto termine el análisis...</span>
+            <!-- PASO 2: ESTADO EN VIVO -->
+            <div class="step-card">
+                <div class="step-title"><span>🤖</span> Estado del Asistente</div>
+                <div id="statusText" class="status-box">Esperando fotos...</div>
+            </div>
+
+            <!-- PASO 3: TUS CARPETAS LISTAS -->
+            <div class="step-card">
+                <div class="step-title"><span>📂</span> Tus Carpetas por Jugador</div>
+                <div id="foldersList">
+                    <p style="color: #64748b; font-size: 14px; text-align: center; padding: 10px;">Cargando carpetas existentes...</p>
                 </div>
-                <h3>Registro en Vivo de la IA</h3>
-                <div id="logBox" class="log-box">Esperando inicio...</div>
+                <a href="/api/descargar-zip" class="btn-download">📦 Descargar Todas las Carpetas en ZIP</a>
             </div>
         </div>
 
         <script>
-            async function iniciarProcesamiento() {{
-                const btn = document.getElementById("btnProcesar");
+            let selectedFiles = [];
+
+            function fotosSeleccionadas(e) {
+                selectedFiles = Array.from(e.target.files);
+                const label = document.getElementById("uploadLabel");
+                const btn = document.getElementById("btnSubir");
+                
+                if (selectedFiles.length > 0) {
+                    label.innerText = `✅ ${selectedFiles.length} fotos seleccionadas`;
+                    btn.style.display = "block";
+                    btn.innerText = `🚀 Subir ${selectedFiles.length} fotos y Organizar`;
+                }
+            }
+
+            async function subirFotos() {
+                if (selectedFiles.length === 0) return;
+                const btn = document.getElementById("btnSubir");
+                const status = document.getElementById("statusText");
+                
                 btn.disabled = true;
-                btn.innerText = "⏳ Creando carpetas por jugador...";
-                const nomina = document.getElementById("nominaInput").value;
+                btn.innerText = "⏳ Subiendo fotos...";
+                status.innerText = `Subiendo ${selectedFiles.length} fotos a la nube...`;
+
                 const formData = new FormData();
-                formData.append("nomina", nomina);
+                for (let i = 0; i < selectedFiles.length; i++) {
+                    formData.append("files", selectedFiles[i]);
+                }
 
-                try {{
-                    const res = await fetch("/api/procesar", {{ method: "POST", body: formData }});
+                try {
+                    const res = await fetch("/api/subir-y-procesar", {
+                        method: "POST",
+                        body: formData
+                    });
                     const data = await res.json();
-                }} catch(e) {{
-                    alert("Error iniciando proceso: " + e);
-                }}
-            }}
+                    status.innerText = "Fotos subidas. La Inteligencia Artificial las está clasificando...";
+                    selectedFiles = [];
+                    document.getElementById("uploadLabel").innerText = "Toca aquí para seleccionar más fotos";
+                    btn.style.display = "none";
+                    btn.disabled = false;
+                } catch(err) {
+                    status.innerText = "Error: " + err;
+                    btn.disabled = false;
+                }
+            }
 
-            async function actualizarEstado() {{
-                try {{
+            async function refrescarCarpetas() {
+                try {
+                    const res = await fetch("/api/carpetas");
+                    const data = await res.json();
+                    const list = document.getElementById("foldersList");
+                    
+                    if (data.folders && Object.keys(data.folders).length > 0) {
+                        list.innerHTML = Object.entries(data.folders).map(([name, files]) => `
+                            <div class="folder-item">
+                                <div class="folder-name">📁 ${name}</div>
+                                <div class="folder-count">${files.length} fotos</div>
+                            </div>
+                        `).join("");
+                    } else {
+                        list.innerHTML = `<p style="color: #64748b; font-size: 14px; text-align: center;">No hay carpetas aún.</p>`;
+                    }
+                } catch(e) {}
+            }
+
+            async function refrescarEstado() {
+                try {
                     const res = await fetch("/api/estado");
                     const data = await res.json();
-                    const logBox = document.getElementById("logBox");
-                    const foldersBox = document.getElementById("foldersBox");
+                    const status = document.getElementById("statusText");
+                    if (data.is_processing) {
+                        status.innerText = `⏳ [${data.processed_photos}/${data.total_photos}] ${data.current_action}`;
+                    } else if (data.logs && data.logs.length > 0) {
+                        status.innerText = "✅ " + data.logs[data.logs.length - 1];
+                    }
+                } catch(e) {}
+            }
 
-                    if (data.logs && data.logs.length > 0) {{
-                        logBox.innerHTML = data.logs.map(l => "<div>> " + l + "</div>").join("");
-                        logBox.scrollTop = logBox.scrollHeight;
-                    }}
-
-                    if (data.folders_created && Object.keys(data.folders_created).length > 0) {{
-                        foldersBox.innerHTML = Object.entries(data.folders_created)
-                            .map(([f, count]) => `<span class="folder-badge">📁 ${{f}} (${{count}} fotos)</span>`)
-                            .join(" ");
-                    }}
-
-                    if (!data.is_processing) {{
-                        const btn = document.getElementById("btnProcesar");
-                        btn.disabled = false;
-                        btn.innerText = "🚀 Iniciar Clasificación en Carpetas por Jugador";
-                    }}
-                }} catch(e) {{}}
-            }}
-
-            setInterval(actualizarEstado, 1500);
+            setInterval(refrescarEstado, 2000);
+            setInterval(refrescarCarpetas, 3000);
+            refrescarCarpetas();
         </script>
     </body>
     </html>
