@@ -6,7 +6,7 @@ import zipfile
 import logging
 from typing import List, Dict, Any
 from fastapi import FastAPI, BackgroundTasks, UploadFile, File
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, FileResponse
 import boto3
 from botocore.config import Config
 import numpy as np
@@ -23,7 +23,7 @@ logger = logging.getLogger("CastilloEnfoca")
 app = FastAPI(
     title="CastilloEnfoca - Organizador Universal de Fotos",
     description="Agrupación biométrica universal de fotos por jugador y dorsal",
-    version="2.2.0"
+    version="2.3.1"
 )
 
 # Variables de entorno Cloudflare R2
@@ -32,9 +32,11 @@ R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY", "")
 R2_ENDPOINT_URL = os.getenv("R2_ENDPOINT_URL", "")
 R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", "agente-1-clasificador-fotos")
 
-# Roster configurable (Dorsal -> Nombre)
+# Roster de jugadores conocidos del torneo (Dorsal -> Nombre)
 roster_map = {
     "1": "Portero_Trujillo",
+    "4": "Defensa_4",
+    "7": "Extremo_7",
     "10": "Capitan_10"
 }
 
@@ -67,7 +69,7 @@ def log_event(message: str):
         processing_status["logs"].pop(0)
 
 def extract_universal_features(img_bytes: bytes) -> Dict[str, Any]:
-    """Extrae rasgos faciales, histograma del uniforme y dorsal numérico de cualquier jugador."""
+    """Extrae rasgos faciales normalizados, histograma de uniforme y dorsales validados."""
     try:
         nparr = np.frombuffer(img_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -94,26 +96,21 @@ def extract_universal_features(img_bytes: bytes) -> Dict[str, Any]:
         detected_dorsal = None
 
         if has_face:
-            # Tomar la cara principal
             fx, fy, fw, fh = max(faces, key=lambda f: f[2] * f[3])
             face_crop = gray[fy:fy+fh, fx:fx+fw]
             if face_crop.size > 0:
                 face_patch = cv2.resize(face_crop, (64, 64))
                 face_patch = cv2.equalizeHist(face_patch)
 
-            # Zona del torso debajo del rostro
             ty1 = min(fy + fh, h - 10)
-            ty2 = min(fy + int(fh * 3.0), h)
+            ty2 = min(fy + int(fh * 2.8), h)
             tx1 = max(0, fx - int(fw * 0.5))
             tx2 = min(w, fx + int(fw * 1.5))
-            
             torso_crop = hsv[ty1:ty2, tx1:tx2]
             if torso_crop.size > 100:
                 hist = cv2.calcHist([torso_crop], [0, 1], None, [16, 16], [0, 180, 0, 256])
                 cv2.normalize(hist, hist, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
                 torso_hist = hist
-
-        # Si no hay cara frontal (ej. foto de espalda), analizar el torso central
         else:
             cy1, cy2 = int(h * 0.15), int(h * 0.70)
             cx1, cx2 = int(w * 0.20), int(w * 0.80)
@@ -123,7 +120,6 @@ def extract_universal_features(img_bytes: bytes) -> Dict[str, Any]:
                 cv2.normalize(hist, hist, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
                 torso_hist = hist
 
-        # Detección de dorsal deportivo con OCR estricto
         if pytesseract:
             cy1, cy2 = int(h * 0.15), int(h * 0.75)
             cx1, cx2 = int(w * 0.20), int(w * 0.80)
@@ -135,7 +131,6 @@ def extract_universal_features(img_bytes: bytes) -> Dict[str, Any]:
                 
                 cfg = "--psm 11 -c tessedit_char_whitelist=0123456789"
                 text = pytesseract.image_to_string(thresh, config=cfg).strip()
-                # Filtrar dorsales válidos y aislados (ej. 1 al 99)
                 nums = re.findall(r'\b([1-9][0-9]?)\b', text)
                 if nums:
                     num_val = int(nums[0])
@@ -158,42 +153,40 @@ def extract_universal_features(img_bytes: bytes) -> Dict[str, Any]:
 def cluster_and_assign_photos(photo_items: List[Dict[str, Any]]) -> Dict[str, List[str]]:
     """
     Agrupa TODAS las fotos del mismo jugador en UNA SOLA CARPETA universalmente.
-    Compara dorsales y similitud biométrica (rostro e histograma del uniforme).
+    Prioriza similitud facial y de uniforme, eliminando carpetas individuales falsas.
     """
-    clusters = []  # Lista de clusters: {"dorsal": ..., "face_patch": ..., "torso_hist": ..., "files": []}
+    clusters = []
     general_files = []
 
     for item in photo_items:
         key = item["key"]
         feat = item["features"]
 
-        # Si no tiene rostro ni torso ni dorsal identificado, es foto general de cancha/equipo
         if not feat["has_face"] and feat["torso_hist"] is None and feat["dorsal"] is None:
             general_files.append(key)
             continue
 
         matched_cluster = None
 
-        # Comparar con clusters existentes
         for c in clusters:
-            # 1. Si comparten el mismo número de dorsal -> ES EL MISMO JUGADOR
+            # 1. Coincidencia facial directa
+            if feat["face_patch"] is not None and c["face_patch"] is not None:
+                res = cv2.matchTemplate(feat["face_patch"], c["face_patch"], cv2.TM_CCOEFF_NORMED)
+                if res[0][0] > 0.45:
+                    matched_cluster = c
+                    break
+
+            # 2. Coincidencia de uniforme + rostro
+            if feat["torso_hist"] is not None and c["torso_hist"] is not None:
+                sim = cv2.compareHist(feat["torso_hist"], c["torso_hist"], cv2.HISTCMP_CORREL)
+                if sim > 0.72:
+                    matched_cluster = c
+                    break
+
+            # 3. Coincidencia de dorsal confirmado
             if feat["dorsal"] and c["dorsal"] and feat["dorsal"] == c["dorsal"]:
                 matched_cluster = c
                 break
-
-            # 2. Si ambos tienen rostro, comparar correlación facial
-            if feat["face_patch"] is not None and c["face_patch"] is not None:
-                res = cv2.matchTemplate(feat["face_patch"], c["face_patch"], cv2.TM_CCOEFF_NORMED)
-                if res[0][0] > 0.60:
-                    matched_cluster = c
-                    break
-
-            # 3. Si comparten similitud de uniforme y uno es foto de espalda del mismo atleta
-            if feat["torso_hist"] is not None and c["torso_hist"] is not None:
-                sim = cv2.compareHist(feat["torso_hist"], c["torso_hist"], cv2.HISTCMP_CORREL)
-                if sim > 0.85:
-                    matched_cluster = c
-                    break
 
         if matched_cluster:
             matched_cluster["files"].append(key)
@@ -202,7 +195,6 @@ def cluster_and_assign_photos(photo_items: List[Dict[str, Any]]) -> Dict[str, Li
             if matched_cluster["face_patch"] is None and feat["face_patch"] is not None:
                 matched_cluster["face_patch"] = feat["face_patch"]
         else:
-            # Crear nuevo cluster
             clusters.append({
                 "dorsal": feat["dorsal"],
                 "face_patch": feat["face_patch"],
@@ -210,26 +202,24 @@ def cluster_and_assign_photos(photo_items: List[Dict[str, Any]]) -> Dict[str, Li
                 "files": [key]
             })
 
-    # Nombrar las carpetas unificadas
     folders_result = {}
     player_counter = 1
 
     for c in clusters:
-        # Si el cluster tiene un dorsal confirmado:
-        if c["dorsal"]:
-            d_num = int(c["dorsal"])
-            name_suffix = roster_map.get(str(d_num), f"Jugador_{d_num}")
-            folder_name = f"organizadas/Dorsal_{d_num:02d}_{name_suffix}"
-        elif len(c["files"]) >= 2:
-            # Si un jugador aparece en 2 o más fotos pero no se le vio el dorsal
-            folder_name = f"organizadas/Jugador_Identificado_{player_counter:02d}"
-            player_counter += 1
-        else:
-            # Foto aislada sin número confirmado -> se asigna a fotos generales
-            general_files.extend(c["files"])
-            continue
+        is_confirmed_player = len(c["files"]) >= 2 or (c["dorsal"] and str(c["dorsal"]) in roster_map)
 
-        folders_result[folder_name] = c["files"]
+        if is_confirmed_player:
+            if c["dorsal"]:
+                d_num = int(c["dorsal"])
+                name_suffix = roster_map.get(str(d_num), f"Jugador_{d_num}")
+                folder_name = f"organizadas/Dorsal_{d_num:02d}_{name_suffix}"
+            else:
+                folder_name = f"organizadas/Jugador_Identificado_{player_counter:02d}"
+                player_counter += 1
+            
+            folders_result[folder_name] = c["files"]
+        else:
+            general_files.extend(c["files"])
 
     if general_files:
         folders_result["organizadas/00_Fotos_Generales_Equipo"] = general_files
@@ -268,11 +258,10 @@ def process_photos_task():
             processing_status["is_processing"] = False
             return
 
-        # Paso 1: Analizar rasgos de todas las fotos
         photo_items = []
         for idx, key in enumerate(pending_photos, 1):
             filename = os.path.basename(key)
-            log_event(f"[{idx}/{len(pending_photos)}] Analizando rasgos: {filename}...")
+            log_event(f"[{idx}/{len(pending_photos)}] Analizando: {filename}...")
             
             obj = s3.get_object(Bucket=R2_BUCKET_NAME, Key=key)
             img_bytes = obj['Body'].read()
@@ -281,11 +270,9 @@ def process_photos_task():
             del img_bytes
             gc.collect()
 
-        # Paso 2: Agrupación universal en una sola carpeta por jugador
-        log_event("Agrupando jugadores por biometría y dorsales...")
+        log_event("Unificando jugadores en sus carpetas...")
         folders_map = cluster_and_assign_photos(photo_items)
 
-        # Paso 3: Guardar en Cloudflare R2
         for folder_name, files in folders_map.items():
             for key in files:
                 filename = os.path.basename(key)
@@ -309,6 +296,12 @@ def process_photos_task():
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+@app.get("/logo.png")
+def get_logo():
+    if os.path.exists("logo.png"):
+        return FileResponse("logo.png", media_type="image/png")
+    return JSONResponse({"error": "No logo"}, status_code=404)
 
 @app.get("/api/estado")
 def get_status():
@@ -402,75 +395,85 @@ def download_all_zip():
     )
 
 @app.get("/", response_class=HTMLResponse)
-def clean_dashboard():
+def castillo_branded_dashboard():
     html = """
     <!DOCTYPE html>
     <html lang="es">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>CastilloEnfoca - Clasificador de Fotos</title>
+        <title>CastilloEnfoca - Organizador de Fotos</title>
         <style>
             * { box-sizing: border-box; margin: 0; padding: 0; }
-            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0b1329; color: #ffffff; padding: 16px; }
-            .container { max-width: 550px; margin: 0 auto; }
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #09090b; color: #ffffff; padding: 16px; }
+            .container { max-width: 520px; margin: 0 auto; }
             
-            .header { text-align: center; margin-bottom: 20px; }
-            .header h1 { font-size: 24px; color: #38bdf8; margin-bottom: 4px; }
-            .header p { color: #94a3b8; font-size: 14px; }
+            /* Encabezado con logo oficial de CastilloEnfoca */
+            .header { text-align: center; margin-bottom: 24px; padding-top: 10px; }
+            .logo-img { width: 110px; height: 110px; border-radius: 50%; margin: 0 auto 12px auto; display: block; box-shadow: 0 0 25px rgba(239, 68, 68, 0.4); border: 2px solid #ef4444; }
+            .header h1 { font-size: 26px; font-weight: 900; letter-spacing: 1px; margin-bottom: 2px; }
+            .brand-white { color: #ffffff; }
+            .brand-red { color: #ef4444; }
+            .header p { color: #a1a1aa; font-size: 14px; }
 
-            .card { background: #1e293b; border-radius: 16px; padding: 20px; margin-bottom: 16px; border: 1px solid #334155; }
+            .card { background: #141416; border-radius: 18px; padding: 22px; margin-bottom: 16px; border: 1px solid #27272a; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
             
-            .upload-box { border: 2px dashed #38bdf8; border-radius: 12px; padding: 32px 16px; text-align: center; cursor: pointer; background: #0f172a; }
-            .upload-box:active { background: #1e293b; }
-            .upload-icon { font-size: 44px; margin-bottom: 8px; }
-            .upload-text { font-size: 16px; font-weight: bold; color: #f8fafc; }
-            .upload-hint { font-size: 13px; color: #94a3b8; margin-top: 4px; }
+            /* Caja de carga con estética neon CastilloEnfoca */
+            .upload-box { border: 2px dashed #f97316; border-radius: 14px; padding: 34px 18px; text-align: center; cursor: pointer; background: #18181b; transition: 0.2s; }
+            .upload-box:active { background: #27272a; border-color: #ef4444; }
+            .upload-icon { font-size: 46px; margin-bottom: 8px; }
+            .upload-text { font-size: 17px; font-weight: bold; color: #ffffff; }
+            .upload-hint { font-size: 13px; color: #a1a1aa; margin-top: 4px; }
             
             input[type="file"] { display: none; }
             
-            .btn-action { width: 100%; background: #0284c7; color: white; border: none; padding: 16px; border-radius: 12px; font-size: 18px; font-weight: bold; cursor: pointer; margin-top: 14px; display: none; }
-            .btn-action:active { background: #0369a1; }
-            .btn-action:disabled { background: #475569; }
+            /* Botón de acción con degradado neon rojo a naranja */
+            .btn-action { width: 100%; background: linear-gradient(135deg, #e11d48 0%, #ea580c 100%); color: white; border: none; padding: 18px; border-radius: 14px; font-size: 18px; font-weight: 900; cursor: pointer; margin-top: 16px; display: none; box-shadow: 0 4px 15px rgba(225, 29, 72, 0.4); text-transform: uppercase; letter-spacing: 0.5px; }
+            .btn-action:active { transform: scale(0.98); }
+            .btn-action:disabled { background: #3f3f46; box-shadow: none; }
 
-            .btn-download { width: 100%; background: #10b981; color: white; border: none; padding: 16px; border-radius: 12px; font-size: 17px; font-weight: bold; cursor: pointer; margin-top: 14px; text-align: center; text-decoration: none; display: none; }
+            /* Botón verde para descargar */
+            .btn-download { width: 100%; background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: white; border: none; padding: 16px; border-radius: 14px; font-size: 17px; font-weight: bold; cursor: pointer; margin-top: 14px; text-align: center; text-decoration: none; display: none; box-shadow: 0 4px 15px rgba(16,185,129,0.3); }
             
-            .btn-clean { width: 100%; background: transparent; color: #94a3b8; border: 1px solid #334155; padding: 10px; border-radius: 10px; font-size: 13px; cursor: pointer; margin-top: 10px; text-align: center; }
-            .btn-clean:hover { color: #f8fafc; border-color: #64748b; }
+            /* Botón limpiar sesión */
+            .btn-clean { width: 100%; background: transparent; color: #a1a1aa; border: 1px solid #27272a; padding: 12px; border-radius: 12px; font-size: 13px; cursor: pointer; margin-top: 12px; text-align: center; }
+            .btn-clean:hover { color: #f43f5e; border-color: #f43f5e; }
 
-            .status-box { background: #090d16; border-radius: 10px; padding: 12px; font-family: monospace; font-size: 13px; color: #38bdf8; text-align: center; }
+            .status-box { background: #09090b; border-radius: 10px; padding: 14px; font-family: monospace; font-size: 13px; color: #f97316; text-align: center; border: 1px solid #27272a; }
             
-            .folder-item { background: #0f172a; border: 1px solid #334155; border-radius: 10px; padding: 14px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
-            .folder-name { font-weight: bold; font-size: 15px; color: #f8fafc; }
-            .folder-count { background: #0284c7; padding: 4px 10px; border-radius: 20px; font-size: 12px; }
+            /* Carpetas ordenadas */
+            .folder-item { background: #18181b; border: 1px solid #27272a; border-radius: 12px; padding: 14px 16px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
+            .folder-name { font-weight: bold; font-size: 15px; color: #ffffff; }
+            .folder-count { background: linear-gradient(135deg, #e11d48 0%, #ea580c 100%); padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: bold; }
         </style>
     </head>
     <body>
         <div class="container">
             <div class="header">
-                <h1>📸 CastilloEnfoca</h1>
-                <p>Organizador de Fotos del Partido</p>
+                <img src="/logo.png" alt="CastilloEnfoca" class="logo-img" onerror="this.style.display='none'">
+                <h1><span class="brand-white">CASTILLO</span><span class="brand-red">ENFOCA</span></h1>
+                <p>Organizador Automático del Partido</p>
             </div>
 
-            <!-- PASO 1: SELECCIONAR FOTOS -->
+            <!-- PASO 1: SUBIR FOTOS -->
             <div class="card">
                 <div class="upload-box" onclick="document.getElementById('fileInput').click()">
-                    <div class="upload-icon">📁</div>
+                    <div class="upload-icon">📸</div>
                     <div class="upload-text" id="uploadLabel">Toca aquí para seleccionar las fotos</div>
                     <div class="upload-hint">Puedes seleccionar todas las fotos del partido juntas</div>
                 </div>
                 <input type="file" id="fileInput" multiple accept="image/*" onchange="fotosSeleccionadas(event)">
-                <button id="btnSubir" class="btn-action" onclick="subirFotos()">🚀 Subir y Organizar con IA</button>
+                <button id="btnSubir" class="btn-action" onclick="subirFotos()">🚀 Subir y Organizar Fotos</button>
             </div>
 
-            <!-- PASO 2: ESTADO (SOLO SE MUESTRA AL PROCESAR) -->
+            <!-- PASO 2: ESTADO EN VIVO -->
             <div class="card" id="cardEstado" style="display: none;">
                 <div id="statusText" class="status-box">Listo para recibir fotos...</div>
             </div>
 
-            <!-- PASO 3: CARPETAS ORGANIZADAS (SOLO CUANDO EXISTEN) -->
+            <!-- PASO 3: TUS CARPETAS ORGANIZADAS -->
             <div class="card" id="cardCarpetas" style="display: none;">
-                <h3 style="font-size: 15px; color: #38bdf8; margin-bottom: 12px;">📂 Tus Carpetas Listas:</h3>
+                <h3 style="font-size: 15px; color: #f97316; margin-bottom: 14px; font-weight: bold;">📂 Tus Carpetas Listas:</h3>
                 <div id="foldersList"></div>
                 <a href="/api/descargar-zip" id="btnDescargar" class="btn-download">📦 Descargar Todas las Carpetas</a>
                 <button class="btn-clean" onclick="limpiarTodo()">🧹 Limpiar para el siguiente partido</button>
