@@ -194,20 +194,8 @@ def detect_dorsal_and_face(img_bytes: bytes) -> Dict[str, Any]:
                 if detected_dorsal:
                     break
 
-            # Si se detectó dorsal y aún no tiene nombre, intentar leer el apellido impreso en la camiseta
-            if detected_dorsal and detected_dorsal not in player_names and crop_torso.size > 0:
-                try:
-                    cfg_text = "--psm 11"
-                    torso_text = pytesseract.image_to_string(crop_torso, config=cfg_text).strip()
-                    words = re.findall(r'\b[A-Za-z]{4,15}\b', torso_text)
-                    stopwords = {"NIKE", "ADIDAS", "PUMA", "DEPORTE", "VENEZUELA", "FUTBOL", "SOCCER", "MATCH", "RIN", "NAT"}
-                    for w in words:
-                        up = w.upper()
-                        if up not in stopwords and len(up) >= 4:
-                            player_names[detected_dorsal] = up.capitalize()
-                            break
-                except Exception:
-                    pass
+            # Fin de búsqueda de dorsal numérico
+            del crop_torso, crop_shorts
 
         del gray, img
         gc.collect()
@@ -497,20 +485,23 @@ def download_all_zip(background_tasks: BackgroundTasks):
 
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-        response = s3.list_objects_v2(Bucket=R2_BUCKET_NAME, Prefix="organizadas/")
-        for obj in response.get("Contents", []):
-            key = obj["Key"]
-            if not key.endswith("/"):
-                file_obj = s3.get_object(Bucket=R2_BUCKET_NAME, Key=key)
-                zip_file.writestr(key.replace("organizadas/", ""), file_obj["Body"].read())
+        paginator = s3.get_paginator('list_objects_v2')
+        for page in paginator.paginate(Bucket=R2_BUCKET_NAME, Prefix="organizadas/"):
+            for obj in page.get("Contents", []):
+                key = obj["Key"]
+                if not key.endswith("/"):
+                    file_obj = s3.get_object(Bucket=R2_BUCKET_NAME, Key=key)
+                    zip_file.writestr(key.replace("organizadas/", ""), file_obj["Body"].read())
 
     zip_buffer.seek(0)
+    zip_bytes = zip_buffer.getvalue()
+    logger.info(f"ZIP de fotos organizadas generado con éxito: {len(zip_bytes)} bytes.")
 
-    # Limpiar automáticamente la sesión e historial en segundo plano tras descargar
+    # Limpiar automáticamente la sesión e historial en segundo plano tras enviar el archivo
     background_tasks.add_task(clean_previous_session)
 
-    return StreamingResponse(
-        zip_buffer,
+    return Response(
+        content=zip_bytes,
         media_type="application/zip",
         headers={"Content-Disposition": "attachment; filename=Fotos_Organizadas_CastilloEnfoca.zip"}
     )
@@ -575,7 +566,7 @@ def clean_dashboard():
             .btn-action:active { transform: scale(0.98); }
             .btn-action:disabled { background: #3f3f46; box-shadow: none; }
 
-            .btn-download { width: 100%; background: linear-gradient(135deg, #ef4444 0%, #f97316 100%); color: white; border: none; padding: 18px; border-radius: 14px; font-size: 18px; font-weight: 900; cursor: pointer; margin-top: 14px; text-align: center; text-decoration: none; display: none; box-shadow: 0 4px 20px rgba(239, 68, 68, 0.45); text-transform: uppercase; letter-spacing: 0.5px; transition: transform 0.15s, box-shadow 0.15s; }
+            .btn-download { width: 100%; background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: white; border: none; padding: 18px; border-radius: 14px; font-size: 18px; font-weight: 900; cursor: pointer; margin-top: 14px; text-align: center; text-decoration: none; display: none; box-shadow: 0 4px 20px rgba(16, 185, 129, 0.45); text-transform: uppercase; letter-spacing: 0.5px; transition: transform 0.15s, box-shadow 0.15s; }
             .btn-download:active { transform: scale(0.98); }
             
             .btn-clean { width: 100%; background: transparent; color: #a1a1aa; border: 1px solid #27272a; padding: 12px; border-radius: 12px; font-size: 13px; cursor: pointer; margin-top: 12px; text-align: center; }
@@ -642,8 +633,10 @@ def clean_dashboard():
 
         <script>
             let selectedFiles = [];
+            window.sessionDescargada = false;
 
             function fotosSeleccionadas(e) {
+                window.sessionDescargada = false;
                 selectedFiles = Array.from(e.target.files);
                 const label = document.getElementById("uploadLabel");
                 const btn = document.getElementById("btnSubir");
@@ -688,15 +681,18 @@ def clean_dashboard():
                 }
             }
 
-            async function descargarYLimpiar(e) {
+            function descargarYLimpiar(e) {
                 if (e) e.preventDefault();
 
                 // 1. Ocultar inmediatamente carpetas e historial de la pantalla
+                window.sessionDescargada = true;
                 const cardCarpetas = document.getElementById("cardCarpetas");
                 const cardEstado = document.getElementById("cardEstado");
                 const foldersList = document.getElementById("foldersList");
+                const btnDescargar = document.getElementById("btnDescargar");
 
                 if (cardCarpetas) cardCarpetas.style.display = "none";
+                if (btnDescargar) btnDescargar.style.display = "none";
                 if (foldersList) foldersList.innerHTML = "";
 
                 if (cardEstado) {
@@ -704,29 +700,20 @@ def clean_dashboard():
                     document.getElementById("statusText").innerText = "📦 Descargando fotos... Pantalla e historial limpios para el siguiente partido.";
                 }
 
-                // 2. Disparar la descarga del archivo ZIP
-                const link = document.createElement("a");
-                link.href = "/api/descargar-zip";
-                link.download = "Fotos_Organizadas_CastilloEnfoca.zip";
-                document.body.appendChild(link);
-                link.click();
-                document.body.removeChild(link);
-
-                // 3. Limpiar en servidor
-                try {
-                    await fetch("/api/limpiar", { method: "POST" });
-                } catch(err) {}
+                // 2. Disparar la descarga del archivo ZIP completo (el servidor limpiará el historial al terminar de enviar)
+                window.location.href = "/api/descargar-zip";
 
                 setTimeout(() => {
                     if (cardEstado) cardEstado.style.display = "none";
                     refrescarBoveda();
-                }, 3500);
+                }, 4000);
             }
 
             async function limpiarTodo() {
                 if (!confirm("¿Deseas limpiar la pantalla para empezar un nuevo partido?")) return;
                 try {
                     await fetch("/api/limpiar", { method: "POST" });
+                    window.sessionDescargada = true;
                     document.getElementById("cardCarpetas").style.display = "none";
                     document.getElementById("cardEstado").style.display = "none";
                     document.getElementById("foldersList").innerHTML = "";
@@ -736,6 +723,7 @@ def clean_dashboard():
             }
 
             async function refrescarCarpetas() {
+                if (window.sessionDescargada) return;
                 try {
                     const res = await fetch("/api/carpetas");
                     const data = await res.json();
