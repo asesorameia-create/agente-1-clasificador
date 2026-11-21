@@ -15,7 +15,10 @@ WORKDIR /app
 
 COPY requirements.txt .
 # PyTorch solo-CPU (la version normal trae CUDA y pesa varios GB) + dependencias
-RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && \
+# (sus dependencias se instalan desde PyPI: el indice de pytorch trae metadatos que pip rechaza)
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir typing-extensions filelock sympy networkx jinja2 fsspec && \
+    pip install --no-cache-dir --no-deps torch --index-url https://download.pytorch.org/whl/cpu && \
     pip install --no-cache-dir -r requirements.txt
 
 # Segundo lector de dorsales: Florence-2 (Microsoft, MIT), version nativa de transformers (sin codigo remoto),
