@@ -112,3 +112,11 @@ Pasos siguientes, en orden:
   vez y se borra (consentimiento de quien busca). Las carpetas no necesitan nombre: el comprador se identifica.
 - Lectores a probar (licencia comercial por VERIFICAR): SmolVLM-500M / SmolVLM2, Moondream2, Florence-2-large;
   votación de SmolVLM sobre varios recortes de la misma persona.
+
+## PRIORIDAD 1 (aclarado por el usuario): el valor es AGRUPAR por persona, no nombrar
+- El fotógrafo pierde horas/días separando fotos jugador por jugador; quiere dedicarse a editar.
+- Medir con las 60 fotos (verdad hecha a mano): mezclas (meta 0), jugador partido en varias carpetas
+  (meta ~0), fotos en Generales con protagonista claro.
+- Reducir carpetas partidas dentro del partido: camiseta + medias/zapatos + peinado + ráfaga por hora EXIF
+  + número leído por SmolVLM propagado a todas las fotos del mismo jugador.
+- "Búscate" (selfie o número) va después, como canal de venta.
