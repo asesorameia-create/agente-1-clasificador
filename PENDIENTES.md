@@ -131,3 +131,10 @@ Pasos siguientes, en orden:
   cara (distintas = separar aunque número y uniforme coincidan); 2) cara en una sola -> conectar por foto
   puente (cara + número) o ráfaga EXIF; 3) sin caras (ambas de espaldas) -> firma de la cifra, texto del
   equipo, patrocinadores, peinado, medias/zapatos.
+
+## Riesgos de producción vistos en pruebas (21 nov 2026)
+- RESUELTO 5b3ea25: caídas por memoria = Render arrancaba 2 copias (WEB_CONCURRENCY) x ~2 GB de modelos.
+  Ahora: --workers 1, trabajador.py aislado y vigilado, límite por contenedor, autorreparación al reiniciar.
+- PENDIENTE: /api/boveda devuelve la lista completa de la bóveda en cada carga de página (crece sin límite).
+- PENDIENTE: recargas repetidas de la página generan carga (cachear /api/carpetas unos segundos).
+- PENDIENTE IMPORTANTE: una sola sesión compartida; dos personas a la vez se pisan el partido.
