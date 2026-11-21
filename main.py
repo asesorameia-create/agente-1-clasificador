@@ -151,7 +151,47 @@ def log_event(message: str):
     _publicar_estado(forzar=True)
 
 
+# ---- freno de memoria: Render mata el servicio si pasa de 4 GB (medido en la prueba de estres)
+MEMORIA_LIMITE_MB = int(os.getenv("MEMORIA_LIMITE_MB", "3000"))
+try:
+    import ctypes
+    _libc = ctypes.CDLL("libc.so.6")
+except Exception:
+    _libc = None
+
+
+def _memoria_mb() -> int:
+    try:
+        with open("/proc/self/status") as f:
+            for linea in f:
+                if linea.startswith("VmRSS:"):
+                    return int(linea.split()[1]) // 1024
+    except Exception:
+        pass
+    return 0
+
+
+def _liberar_memoria():
+    gc.collect()
+    if _libc is not None:
+        try:
+            _libc.malloc_trim(0)      # devuelve al sistema la memoria que Python ya no usa
+        except Exception:
+            pass
+
+
+def _esperar_memoria():
+    """Si la memoria esta alta, espera (liberando) antes de abrir otra foto: mas lento, pero nunca se cae."""
+    for _ in range(120):
+        if _memoria_mb() < MEMORIA_LIMITE_MB:
+            return
+        _liberar_memoria()
+        time.sleep(1)
+    logger.warning("Memoria alta (%s MB) tras 2 min de espera; se continua", _memoria_mb())
+
+
 def _analizar(key: str, datos: Optional[bytes], sid: str) -> Dict[str, Any]:
+    _esperar_memoria()
     try:
         if datos is None:
             datos = ALMACEN.leer(key)
@@ -161,7 +201,7 @@ def _analizar(key: str, datos: Optional[bytes], sid: str) -> Dict[str, Any]:
         a = {"nombre": os.path.basename(key), "hora": None, "jugadores": [], "firma": None, "ok": False}
     finally:
         datos = None
-        gc.collect()
+        _liberar_memoria()
     a["key"] = key
     for j in a.get("jugadores", []):
         j.pop("torso", None)
@@ -376,7 +416,8 @@ def diagnostico():
     return {"almacen": type(ALMACEN).__name__ if ALMACEN else None, "modelos": motor.modelos_disponibles(),
             "cpus": CPUS, "hilos_analisis": HILOS, "opencv": cv2.__version__, "version": app.version,
             "florence": os.getenv("LECTOR_FLORENCE", "1") != "0",
-            "huellas_guardadas": len(ALMACEN.listar(PREF_ANALISIS)) if ALMACEN else None}
+            "huellas_guardadas": len(ALMACEN.listar(PREF_ANALISIS)) if ALMACEN else None,
+            "memoria_mb": _memoria_mb(), "memoria_limite_mb": MEMORIA_LIMITE_MB}
 
 
 @app.get("/logo.png")

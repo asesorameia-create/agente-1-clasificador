@@ -26,7 +26,8 @@ RUN pip install --no-cache-dir --upgrade pip && \
 ENV HF_HOME=/app/models/hf \
     FLORENCE_REPO=florence-community/Florence-2-base \
     FLORENCE_REVISION=00921df66db728a9ceb750f5eca43e5c203a2051 \
-    FLORENCE_HILOS=2
+    FLORENCE_HILOS=2 \
+    MALLOC_ARENA_MAX=2
 RUN python -c "from transformers import AutoProcessor, Florence2ForConditionalGeneration as F; import os; r=os.environ['FLORENCE_REPO']; v=os.environ['FLORENCE_REVISION']; AutoProcessor.from_pretrained(r, revision=v); F.from_pretrained(r, revision=v)"
 ENV HF_HUB_OFFLINE=1
 
