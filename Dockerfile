@@ -58,4 +58,6 @@ COPY . .
 
 EXPOSE 10000
 
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-10000} --timeout-keep-alive 75"]
+# UNA sola copia del servidor: Render pone WEB_CONCURRENCY=2 y cada copia cargaba los modelos (~2 GB c/u)
+# -> 2 x 2 GB > 4 GB -> "Ran out of memory" (medido 21 nov 2026). El analisis va en un trabajador aislado.
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-10000} --workers 1 --timeout-keep-alive 75"]

@@ -32,6 +32,8 @@ from fastapi.concurrency import run_in_threadpool
 from starlette.background import BackgroundTask
 
 import motor_biometrico as motor
+import trabajador
+AISLADO = os.getenv("TRABAJADOR_AISLADO", "1") != "0"
 import identidad
 from almacen import crear_almacen
 
@@ -182,10 +184,14 @@ def _liberar_memoria():
             pass
 
 
+ENTRADA_LIMITE_MB = int(os.getenv("ENTRADA_LIMITE_MB", "3300"))
+
+
 def _esperar_memoria():
     """Si la memoria esta alta, espera (liberando) antes de abrir otra foto: mas lento, pero nunca se cae."""
     for _ in range(120):
-        if _memoria_mb() < MEMORIA_LIMITE_MB:
+        # se mira la memoria de TODO el servidor (lo que Render mide), no solo la de este proceso
+        if _memoria_mb() < MEMORIA_LIMITE_MB and trabajador.memoria_contenedor_mb() < ENTRADA_LIMITE_MB:
             return
         _liberar_memoria()
         time.sleep(1)
@@ -197,11 +203,14 @@ def _analizar(key: str, datos: Optional[bytes], sid: str) -> Dict[str, Any]:
     try:
         if datos is None:
             datos = ALMACEN.leer(key)
-        m0, t0 = _memoria_mb(), time.time()
-        a = motor.analizar_foto(datos, os.path.basename(key))
-        logger.info("MEM foto=%s personas=%d antes=%dMB despues=%dMB maximo_historico=%dMB %.1fs",
-                    os.path.basename(key), len(a.get("jugadores", [])), m0, _memoria_mb(), _memoria_mb("VmHWM"),
-                    time.time() - t0)
+        t0 = time.time()
+        if AISLADO:
+            a = trabajador.TRABAJADOR.analizar(datos, os.path.basename(key))   # proceso aparte: nunca tumba la pagina
+        else:
+            a = motor.analizar_foto(datos, os.path.basename(key))
+        logger.info("MEM foto=%s personas=%d trabajador_pico=%sMB servidor=%dMB liviano=%s %.1fs",
+                    os.path.basename(key), len(a.get("jugadores", [])), a.get("memoria_trabajador_mb", "-"),
+                    _memoria_mb(), bool(a.get("modo_liviano")), time.time() - t0)
     except Exception as e:
         logger.exception("No se pudo analizar %s: %s", key, e)
         a = {"nombre": os.path.basename(key), "hora": None, "jugadores": [], "firma": None, "ok": False}
@@ -423,7 +432,10 @@ def diagnostico():
             "cpus": CPUS, "hilos_analisis": HILOS, "opencv": cv2.__version__, "version": app.version,
             "florence": os.getenv("LECTOR_FLORENCE", "1") != "0",
             "huellas_guardadas": len(ALMACEN.listar(PREF_ANALISIS)) if ALMACEN else None,
-            "memoria_mb": _memoria_mb(), "memoria_maxima_mb": _memoria_mb("VmHWM"), "memoria_limite_mb": MEMORIA_LIMITE_MB}
+            "memoria_mb": _memoria_mb(), "memoria_maxima_mb": _memoria_mb("VmHWM"), "memoria_limite_mb": MEMORIA_LIMITE_MB,
+            "trabajador_aislado": AISLADO, "trabajador_mb": trabajador.TRABAJADOR.rss_mb(),
+            "trabajador_reinicios": trabajador.TRABAJADOR.reinicios,
+            "contenedor_mb": trabajador.memoria_contenedor_mb(), "pid": os.getpid()}
 
 
 @app.get("/logo.png")
@@ -704,6 +716,29 @@ def get_backup_photo(filename: str):
                         headers={"Content-Disposition": f'attachment; filename="{_nombre_seguro(filename)}"'})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=404)
+
+
+def _autorreparar():
+    """Si el servidor se reinicio a mitad de un partido, retoma SOLO (sin que el fotografo toque nada).
+    Espera mas que el latido maximo: asi nunca compite con una copia vieja que siga viva durante un despliegue."""
+    time.sleep(LATIDO_MAX_SEG + 15)
+    try:
+        if processing_status["is_processing"] or not ALMACEN:
+            return
+        c = _estado_compartido() or {}
+        if c.get("is_processing") and time.time() - c.get("actualizado", 0) > LATIDO_MAX_SEG:
+            logger.warning("Analisis interrumpido detectado: se retoma automaticamente")
+            processing_status["is_processing"] = True
+            processing_status["nomina"] = c.get("nomina", "")
+            _publicar_estado(forzar=True)
+            process_photos_task(c.get("nomina", ""))
+    except Exception:
+        logger.exception("No se pudo retomar automaticamente")
+
+
+@app.on_event("startup")
+def _al_arrancar():
+    threading.Thread(target=_autorreparar, daemon=True, name="autorreparar").start()
 
 
 @app.post("/api/procesar")
