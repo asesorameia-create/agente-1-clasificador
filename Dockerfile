@@ -14,7 +14,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# PyTorch solo-CPU (la version normal trae CUDA y pesa varios GB) + dependencias
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Segundo lector de dorsales: Florence-2 (Microsoft, MIT), version nativa de transformers (sin codigo remoto),
+# revision fija = la misma que se probo. Medido: dorsales correctos 4 -> 10 en las fotos del cliente, 0 mezclas.
+ENV HF_HOME=/app/models/hf \
+    FLORENCE_REPO=florence-community/Florence-2-base \
+    FLORENCE_REVISION=00921df66db728a9ceb750f5eca43e5c203a2051 \
+    FLORENCE_HILOS=2
+RUN python -c "from transformers import AutoProcessor, Florence2ForConditionalGeneration as F; import os; r=os.environ['FLORENCE_REPO']; v=os.environ['FLORENCE_REVISION']; AutoProcessor.from_pretrained(r, revision=v); F.from_pretrained(r, revision=v)"
+ENV HF_HUB_OFFLINE=1
 
 # Modelos biometricos oficiales de OpenCV Zoo (Apache-2.0 / MIT, uso comercial permitido).
 # Se verifica la huella SHA-256 de cada archivo: Render usa exactamente lo que se probo.

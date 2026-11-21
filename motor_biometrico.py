@@ -424,8 +424,22 @@ def _votar_florence(jugadores: List[Dict[str, Any]], torsos: List[np.ndarray]) -
         else:
             de_espaldas = j.get("huella") is None
             j["dorsal"], j["fuente_dorsal"] = f, "florence"
-            j["conf_dorsal"] = 0.97 if (len(f) == 2 and de_espaldas) else 0.93
+            # un solo lector nunca basta para nombrar la carpeta (medido: leyo "16" donde era 15):
+            # queda como sugerencia que el fotografo confirma con un toque
+            j["conf_dorsal"] = 0.93
             j["alto_dorsal"] = max(j.get("alto_dorsal", 0.0), 0.09)
+    # un mismo numero no puede ser de dos jugadores de la misma foto: se queda el de mas votos
+    por_num: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for j in jugadores:
+        if j.get("dorsal"):
+            por_num[j["dorsal"]].append(j)
+    for js in por_num.values():
+        if len(js) > 1:
+            js.sort(key=lambda x: -x.get("conf_dorsal", 0.0))
+            for x in js[1:]:
+                x["lecturas_debiles"] = [x["dorsal"]]
+                x["dorsal"], x["conf_dorsal"] = None, 0.0
+                x.pop("firma_numero", None)
 
 
 def _fusionar_vision(jugadores: List[Dict[str, Any]], torsos: List[np.ndarray]) -> None:

@@ -346,12 +346,13 @@ function partes(nombre, info) {
 
 function ficha(nombre, fotos, info, i) {
   const p = partes(nombre, info);
-  const titulo = p.nombre ? esc(p.nombre) : (p.dorsal ? `Jugador #${esc(p.dorsal)}` : "Jugador sin número");
+  const sug = !p.dorsal && info.sugerido ? String(info.sugerido) : "";
+  const titulo = p.nombre ? esc(p.nombre) : (p.dorsal ? `Jugador #${esc(p.dorsal)}` : (sug ? `¿Jugador #${esc(sug)}? (confírmalo)` : "Jugador sin número"));
   const mini = `/api/miniatura/${encodeURIComponent(nombre)}?t=${Date.now()}`;
   return `
   <div class="ficha ${info.revisada ? "revisada" : ""}" data-carpeta="${esc(nombre)}">
     <div class="foto" style="background-image:url('${mini}')" onclick="verFotos(${i})">
-      ${p.dorsal ? `<div class="num">#${esc(p.dorsal)}</div>` : ""}
+      ${p.dorsal ? `<div class="num">#${esc(p.dorsal)}</div>` : (sug ? `<div class="num" style="opacity:.75;border-style:dashed">¿#${esc(sug)}?</div>` : "")}
       <div class="cuantas">${fotos.length} ${fotos.length === 1 ? "foto" : "fotos"}</div>
     </div>
     <div class="info">
@@ -362,7 +363,7 @@ function ficha(nombre, fotos, info, i) {
         <button onclick="abrirForm(${i})">✏️ Corregir</button>
       </div>
       <form id="form${i}" onsubmit="return guardar(event, ${i})">
-        <div class="fila"><input name="dorsal" inputmode="numeric" maxlength="2" placeholder="N°" value="${esc(p.dorsal)}" style="max-width:64px">
+        <div class="fila"><input name="dorsal" inputmode="numeric" maxlength="2" placeholder="N°" value="${esc(p.dorsal || sug)}" style="max-width:64px">
           <input name="equipo" placeholder="Equipo" value="${esc(p.equipo)}"></div>
         <input name="nombre" placeholder="Nombre (opcional)" value="${esc(p.nombre)}">
         <button class="guardar" type="submit">✅ Guardar</button>

@@ -182,7 +182,7 @@ def equipos_en_texto(texto: str) -> set:
             continue
         mejor = max((difflib.SequenceMatcher(None, cn, t[k:k + L]).ratio() for k in range(0, max(1, len(t) - L + 1))),
                     default=0.0)
-        if mejor >= 0.75:
+        if mejor >= 0.82:
             out.add(n)
     return out
 
@@ -289,7 +289,9 @@ def clasificar_lote(analisis: List[Dict[str, Any]], nomina: str = "") -> Dict[st
                 continue
             dn = dist_firma_numero(ja.get("firma_numero"), jb.get("firma_numero"))
             # mismo numero con los mismos colores de cifra/fondo (misma camiseta), o camisetas casi identicas
-            if dn <= DIST_FIRMA_NUMERO or (dn >= 999 and _dist_color(ja["color"], jb["color"]) <= DIST_EQUIPO):
+            # sin firma del numero, el color solo no basta (camisetas parecidas de otro equipo): exige la misma cara
+            caras_ok = ja["huella"] is not None and jb["huella"] is not None                 and float(np.dot(ja["huella"], jb["huella"])) >= SIM_UNIR_A_DORSAL
+            if dn <= DIST_FIRMA_NUMERO or (dn >= 999 and _dist_color(ja["color"], jb["color"]) <= DIST_EQUIPO and caras_ok):
                 G.unir(a, b)
 
     # ---------------- 2. biometria facial: pares de mayor a menor similitud
@@ -450,16 +452,30 @@ def clasificar_lote(analisis: List[Dict[str, Any]], nomina: str = "") -> Dict[st
     # ---------------- 5. equipo: lo leido en la camiseta del jugador; si no, se hereda de un companero
     #                     DE LA MISMA FOTO con la misma camiseta (misma luz, mismo partido); si no, de un
     #                     jugador con camiseta casi identica; si no, se deja vacio. Nunca un color como nombre.
-    nombres_foto: Dict[int, List[Tuple[np.ndarray, str]]] = defaultdict(list)
-    for fi, ji, j in inst:
-        n = (_equipo_por_vision([j["equipo_vision"]]) if j.get("equipo_vision") else None) or _nombre_equipo(j["palabras"])
-        if n and j["color"] is not None:
-            nombres_foto[fi].append((j["color"], n))
+    def votos_equipo(miembros_):
+        v: Counter = Counter()
+        for i in miembros_:
+            j = inst[i][2]
+            if j.get("equipo_vision"):
+                n = _equipo_por_vision([j["equipo_vision"]])
+                if n:
+                    v[n] += 1
+            n = _nombre_equipo(j["palabras"])
+            if n:
+                v[n] += 1
+        return v
+
     portadores = []
+    nombres_foto: Dict[int, List[Tuple[np.ndarray, str]]] = defaultdict(list)
     for P in jugadores:
-        P["equipo"] = _equipo_por_vision(P.get("equipos_v", [])) or _nombre_equipo(P["palabras"])
+        v = votos_equipo(P["miembros"])
+        top = v.most_common(2)
+        # el equipo se escribe solo con 2 senales que coinciden (dos lecturas o dos fotos) y sin empate
+        P["equipo"] = top[0][0] if top and top[0][1] >= 2 and (len(top) < 2 or top[0][1] > top[1][1]) else None
         if P["equipo"] and P["color"] is not None:
             portadores.append((P["equipo"], P["color"]))
+            for fi in P["fotos"]:
+                nombres_foto[fi].append((P["color"], P["equipo"]))
     for P in jugadores:
         if P["equipo"]:
             continue
@@ -516,7 +532,9 @@ def clasificar_lote(analisis: List[Dict[str, Any]], nomina: str = "") -> Dict[st
             carpetas[c] = [analisis[fi]["key"] for fi in P["fotos"]]
         if P["mini"]:
             miniaturas[c] = P["mini"]
-        detalle[c] = {"equipo": P["equipo"], "dorsal": P["dorsal"], "nombre": nombre, "fotos": len(P["fotos"])}
+        sugerido = None if P["dorsal"] else (sorted(P.get("lecturas") or [])[:1] or [None])[0]
+        detalle[c] = {"equipo": P["equipo"], "dorsal": P["dorsal"], "nombre": nombre, "fotos": len(P["fotos"]),
+                      "sugerido": sugerido}
         for d in P["dudas"]:
             did = f"d{len(dudas_salida) + 1:04d}"
             dudas_salida.append({
@@ -545,9 +563,14 @@ def clasificar_lote(analisis: List[Dict[str, Any]], nomina: str = "") -> Dict[st
                 continue
             if A["color"] is None or B["color"] is None or _dist_color(A["color"], B["color"]) <= DIST_UNION_COLOR:
                 pares_u.append((1.5, A, B))
+    # mismo numero en dos fichas (sin prueba para unirlas solas): se pregunta
+    for x, A in enumerate(todas):
+        for B in todas[x + 1:]:
+            if A["dorsal"] and A["dorsal"] == B["dorsal"] and not (set(A["fotos"]) & set(B["fotos"])):
+                pares_u.append((1.6, A, B))
     for x, A in enumerate(fichas):
         for B in fichas[x + 1:]:
-            if A["dorsal"] and B["dorsal"]:
+            if A["dorsal"] and B["dorsal"] and A["dorsal"] != B["dorsal"]:
                 continue   # dos numeros distintos leidos con seguridad: personas distintas
             if set(A["fotos"]) & set(B["fotos"]):
                 continue   # aparecen juntos en una foto
@@ -567,7 +590,8 @@ def clasificar_lote(analisis: List[Dict[str, Any]], nomina: str = "") -> Dict[st
             "id": f"u{len(dudas_salida) + 1:04d}", "tipo": "unir", "carpeta": A["carpeta"], "carpeta_b": B["carpeta"],
             "foto": analisis[B["fotos"][0]]["key"], "foto_ref": None, "dorsal": A["dorsal"], "equipo": A["equipo"],
             "estado": "pendiente",
-            "motivo": (f"En esta ficha se leyó el número {A['dorsal']}" if s >= 1.5
+            "motivo": (f"Las dos fichas tienen el número {A['dorsal']}" if s >= 1.6 else
+                       f"En esta ficha se leyó el número {A['dorsal']}" if s >= 1.5
                        else "Dos fichas con caras parecidas: si son el mismo jugador, se unen"),
         })
 

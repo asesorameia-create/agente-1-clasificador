@@ -24,6 +24,7 @@ import numpy as np
 logger = logging.getLogger("CastilloEnfoca.florence")
 
 REPO = os.getenv("FLORENCE_REPO", "florence-community/Florence-2-base")
+REVISION = os.getenv("FLORENCE_REVISION", "00921df66db728a9ceb750f5eca43e5c203a2051")   # la version probada
 _lock = threading.Lock()
 _modelo = None
 _fallo = False
@@ -48,8 +49,8 @@ def _cargar():
         import torch
         from transformers import AutoProcessor, Florence2ForConditionalGeneration
         torch.set_num_threads(max(1, int(os.getenv("FLORENCE_HILOS", str(os.cpu_count() or 1)))))
-        proc = AutoProcessor.from_pretrained(REPO)
-        model = Florence2ForConditionalGeneration.from_pretrained(REPO, torch_dtype=torch.float32).eval()
+        proc = AutoProcessor.from_pretrained(REPO, revision=REVISION)
+        model = Florence2ForConditionalGeneration.from_pretrained(REPO, revision=REVISION, torch_dtype=torch.float32).eval()
         _modelo = (proc, model)
         logger.info("Florence-2 cargado (%s)", REPO)
     except Exception as e:
