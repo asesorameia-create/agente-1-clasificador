@@ -14,7 +14,8 @@ import gc
 import re
 import json
 import time
-import queue
+import uuid
+import pickle
 import zipfile
 import logging
 import tempfile
@@ -80,8 +81,13 @@ MAX_EN_MEMORIA = 3 * HILOS     # fotos esperando analisis con sus bytes en RAM (
 logger.info("CPUs=%s hilos de analisis=%s almacen=%s", CPUS, HILOS, type(ALMACEN).__name__ if ALMACEN else None)
 
 _lock = threading.RLock()
-_tareas: Dict[str, Future] = {}           # key -> analisis en curso / listo
+_tareas: Dict[str, Future] = {}           # "sesion/key" -> analisis en curso / listo (en esta copia del servidor)
 _en_memoria = threading.Semaphore(MAX_EN_MEMORIA)
+INSTANCIA = uuid.uuid4().hex[:8]          # Render puede tener 2 copias vivas (deploys): el estado vive en R2
+PREF_ANALISIS = PREF_SESION + "analisis/"
+ESTADO_KEY = PREF_SESION + "estado.json"
+ID_KEY = PREF_SESION + "id.txt"
+LATIDO_MAX_SEG = 90                       # sin latido en 90 s = el proceso que trabajaba murio
 
 processing_status: Dict[str, Any] = {
     "is_processing": False,
@@ -91,13 +97,49 @@ processing_status: Dict[str, Any] = {
     "current_action": "Listo para recibir fotos del partido",
     "folders_created": {},
     "logs": [],
-    "fase": "espera",          # espera | subiendo | analizando | carpetas | listo | error
+    "fase": "espera",          # espera | subiendo | analizando | carpetas | listo | error | interrumpido
     "analizadas": 0,
     "eta_seg": None,
     "resumen": None,
     "inicio": None,
     "duracion_seg": None,
+    "actualizado": 0.0,
+    "instancia": INSTANCIA,
 }
+_ultimo_publicado = 0.0
+
+
+def _publicar_estado(forzar: bool = False):
+    """Guarda el estado en R2 para que cualquier copia del servidor muestre lo mismo (y sirva de latido)."""
+    global _ultimo_publicado
+    processing_status["actualizado"] = time.time()
+    processing_status["instancia"] = INSTANCIA
+    if not ALMACEN or (not forzar and time.time() - _ultimo_publicado < 1.0):
+        return
+    try:
+        ALMACEN.subir(ESTADO_KEY, json.dumps(processing_status, ensure_ascii=False).encode("utf-8"), "application/json")
+        _ultimo_publicado = time.time()
+    except Exception as e:
+        logger.warning("No se pudo publicar el estado: %s", e)
+
+
+def _estado_compartido() -> Optional[Dict[str, Any]]:
+    try:
+        return json.loads(ALMACEN.leer(ESTADO_KEY).decode("utf-8"))
+    except Exception:
+        return None
+
+
+def _id_sesion(crear: bool = False) -> str:
+    """Identificador del partido actual (comun a todas las copias del servidor)."""
+    if crear:
+        sid = uuid.uuid4().hex[:12]
+        ALMACEN.subir(ID_KEY, sid.encode(), "text/plain")
+        return sid
+    try:
+        return ALMACEN.leer(ID_KEY).decode().strip()
+    except Exception:
+        return _id_sesion(crear=True)
 
 
 def log_event(message: str):
@@ -106,9 +148,10 @@ def log_event(message: str):
     processing_status["current_action"] = message
     if len(processing_status["logs"]) > 50:
         processing_status["logs"].pop(0)
+    _publicar_estado(forzar=True)
 
 
-def _analizar(key: str, datos: Optional[bytes]) -> Dict[str, Any]:
+def _analizar(key: str, datos: Optional[bytes], sid: str) -> Dict[str, Any]:
     try:
         if datos is None:
             datos = ALMACEN.leer(key)
@@ -122,25 +165,37 @@ def _analizar(key: str, datos: Optional[bytes]) -> Dict[str, Any]:
     a["key"] = key
     for j in a.get("jugadores", []):
         j.pop("torso", None)
-    with _lock:
-        processing_status["analizadas"] = sum(1 for f in _tareas.values() if f.done()) + 1
+    # memoria a prueba de caidas: la huella de cada foto queda en la nube apenas se calcula
+    try:
+        if a.get("ok") and _id_sesion() == sid:
+            ALMACEN.subir(f"{PREF_ANALISIS}{key}.pkl", pickle.dumps(a, protocol=4), "application/octet-stream")
+    except Exception as e:
+        logger.warning("No se pudo guardar el analisis de %s: %s", key, e)
     return a
 
 
-def _encolar(key: str, datos: Optional[bytes]):
+def _encolar(key: str, datos: Optional[bytes], sid: str):
     """Lanza el analisis de una foto. Si hay muchas en cola, no guarda sus bytes (se releen luego)."""
+    tk = f"{sid}/{key}"
     with _lock:
-        if key in _tareas:
+        if tk in _tareas:
             return
         if datos is not None and _en_memoria.acquire(blocking=False):
             def tarea(k=key, d=datos):
                 try:
-                    return _analizar(k, d)
+                    return _analizar(k, d, sid)
                 finally:
                     _en_memoria.release()
-            _tareas[key] = EJECUTOR.submit(tarea)
+            _tareas[tk] = EJECUTOR.submit(tarea)
         else:
-            _tareas[key] = EJECUTOR.submit(_analizar, key, None)
+            _tareas[tk] = EJECUTOR.submit(_analizar, key, None, sid)
+
+
+def _analisis_guardado(key: str) -> Optional[Dict[str, Any]]:
+    try:
+        return pickle.loads(ALMACEN.leer(f"{PREF_ANALISIS}{key}.pkl"))
+    except Exception:
+        return None
 
 
 # Compatibilidad con los nombres del pipeline anterior ---------------------------------
@@ -190,11 +245,13 @@ def _limpiar_sesion(borrar_fotos: bool = True):
             ALMACEN.borrar_prefijo(p)
         if borrar_fotos:
             ALMACEN.borrar(_fotos_sesion())
+        _id_sesion(crear=True)      # partido nuevo: ningun analisis viejo puede colarse
     processing_status.update({
-        "folders_created": {}, "logs": [], "current_action": "Listo para recibir fotos del partido",
+        "is_processing": False, "folders_created": {}, "logs": [], "current_action": "Listo para recibir fotos del partido",
         "fase": "espera", "analizadas": 0, "total_photos": 0, "processed_photos": 0, "eta_seg": None,
         "resumen": None, "inicio": None, "duracion_seg": None,
     })
+    _publicar_estado(forzar=True)
 
 
 # ------------------------------------------------------------------ pipeline principal
@@ -206,41 +263,60 @@ def process_photos_task(nomina: str = ""):
         return
     processing_status["is_processing"] = True
     processing_status["fase"] = "analizando"
-    processing_status["inicio"] = processing_status.get("inicio") or time.time()
+    compartido = _estado_compartido() or {}
+    processing_status["inicio"] = processing_status.get("inicio") or compartido.get("inicio") or time.time()
+    _publicar_estado(forzar=True)
     try:
         if not motor.modelos_disponibles():
             raise RuntimeError(f"Faltan los modelos biometricos en {motor.MODELS_DIR}")
+        sid = _id_sesion()
         keys = sorted(_fotos_sesion())
         processing_status["total_photos"] = len(keys)
         processing_status["processed_photos"] = 0
         if not keys:
-            log_event("No hay fotos para organizar.")
             processing_status["fase"] = "espera"
+            log_event("No hay fotos para organizar.")
             return
+        # 1) lo que ya se analizo (en esta copia, en otra copia, o antes de un reinicio) no se repite
+        guardados = {k for k, _ in ALMACEN.listar(PREF_ANALISIS)}
+        listos: Dict[str, Dict[str, Any]] = {}
         for k in keys:
-            _encolar(k, None)
+            if f"{sid}/{k}" not in _tareas and f"{PREF_ANALISIS}{k}.pkl" in guardados:
+                a = _analisis_guardado(k)
+                if a is not None:
+                    listos[k] = a
+        for k in keys:
+            if k not in listos:
+                _encolar(k, None, sid)
         log_event(f"Analizando rostros y dorsales de {len(keys)} fotos...")
-        t0, base = time.time(), sum(1 for k in keys if _tareas[k].done())
+        pend = [k for k in keys if k not in listos]
+        t0, base = time.time(), sum(1 for k in pend if _tareas[f"{sid}/{k}"].done())
         while True:
-            hechas = sum(1 for k in keys if _tareas[k].done())
+            hechas_p = sum(1 for k in pend if _tareas[f"{sid}/{k}"].done())
+            hechas = len(listos) + hechas_p
             processing_status["processed_photos"] = hechas
             processing_status["analizadas"] = hechas
-            if hechas > base:
-                vel = (time.time() - t0) / (hechas - base)
-                processing_status["eta_seg"] = int(vel * (len(keys) - hechas)) + 5
+            if hechas_p > base:
+                vel = (time.time() - t0) / (hechas_p - base)
+                processing_status["eta_seg"] = int(vel * (len(pend) - hechas_p)) + 5
             processing_status["current_action"] = f"Analizando rostros y dorsales: {hechas}/{len(keys)} fotos"
+            _publicar_estado()   # latido: las demas copias saben que este proceso sigue vivo
             if hechas >= len(keys):
                 break
             time.sleep(0.5)
         analisis = []
         for k in keys:
+            if k in listos:
+                analisis.append(listos[k])
+                continue
             try:
-                analisis.append(_tareas[k].result())
+                analisis.append(_tareas[f"{sid}/{k}"].result())
             except Exception as e:
                 logger.error("Analisis fallido %s: %s", k, e)
                 analisis.append({"key": k, "jugadores": [], "hora": None, "firma": None})
 
         processing_status["fase"] = "carpetas"
+        processing_status["eta_seg"] = None
         log_event("Uniendo huellas biometricas y creando una carpeta por jugador...")
         res = identidad.clasificar_lote(analisis, nomina)
 
@@ -253,6 +329,7 @@ def process_photos_task(nomina: str = ""):
         def copiar(par):
             ALMACEN.copiar(*par)
             processing_status["processed_photos"] += 1
+            _publicar_estado()
 
         with ThreadPoolExecutor(max_workers=8) as ex:
             list(ex.map(copiar, copias))
@@ -266,15 +343,18 @@ def process_photos_task(nomina: str = ""):
                          "fotos": len(keys), "fecha": time.strftime("%Y-%m-%d %H:%M")})
         processing_status["fase"] = "listo"
         processing_status["last_run"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        processing_status["is_processing"] = False
         r = res["resumen"]
         log_event(f"¡Listo! {r['jugadores']} jugadores identificados en {r['fotos']} fotos.")
     except Exception as e:
         logger.exception("Error procesando fotos")
         processing_status["fase"] = "error"
+        processing_status["is_processing"] = False
         log_event(f"Error procesando fotos: {e}")
     finally:
         processing_status["is_processing"] = False
         processing_status["eta_seg"] = None
+        _publicar_estado(forzar=True)
         gc.collect()
 
 
@@ -298,9 +378,22 @@ def get_logo():
     return JSONResponse({"error": "No logo"}, status_code=404)
 
 
+def _estado_vigente() -> Dict[str, Any]:
+    """El estado mas reciente entre esta copia y la nube; si quien trabajaba dejo de latir, 'interrumpido'."""
+    if processing_status["is_processing"] or not ALMACEN:
+        return processing_status
+    c = _estado_compartido()
+    if not c or c.get("actualizado", 0) <= processing_status.get("actualizado", 0):
+        return processing_status
+    if c.get("is_processing") and time.time() - c.get("actualizado", 0) > LATIDO_MAX_SEG:
+        c = dict(c, is_processing=False, fase="interrumpido",
+                 current_action="El análisis se interrumpió (el servidor se reinició). Toca «Continuar»: lo ya analizado no se repite.")
+    return c
+
+
 @app.get("/api/estado")
 def get_status():
-    return processing_status
+    return _estado_vigente()
 
 
 @app.get("/api/carpetas")
@@ -342,7 +435,7 @@ def get_doubt_thumbnail(duda_id: str):
 async def confirmar_duda(request: Request):
     """El fotografo responde una duda: si=True mete la foto en la carpeta del jugador; si=False la descarta."""
     d = await request.json()
-    did, si = str(d.get("id", "")), bool(d.get("si"))
+    did, si, elegida = str(d.get("id", "")), bool(d.get("si")), str(d.get("carpeta", ""))
 
     def aplicar():
         ses = _leer_sesion()
@@ -351,8 +444,31 @@ async def confirmar_duda(request: Request):
             return {"error": "Duda no encontrada"}
         if duda["estado"] != "pendiente":
             return {"ok": True, "ya": duda["estado"]}
+        if duda.get("tipo") == "quien" and si:
+            if elegida not in duda.get("candidatos", []):
+                return {"error": "Jugador no valido"}
+            duda["carpeta"] = elegida
         duda["estado"] = "si" if si else "no"
         carpeta = duda["carpeta"]
+        if si and duda.get("tipo") == "unir":
+            b = duda["carpeta_b"]
+            _mover_carpeta(b, carpeta)            # dos fichas eran el mismo jugador: queda una sola
+            det = ses.setdefault("detalle", {})
+            det.pop(b, None)
+            det.setdefault(carpeta, {})["fotos"] = len(ALMACEN.listar(f"{PREF_ORG}{carpeta}/"))
+            for x in ses["dudas"]:              # lo que apuntaba a la ficha absorbida ahora apunta a la que queda
+                if x is duda:
+                    continue
+                if x.get("carpeta") == b:
+                    x["carpeta"] = carpeta
+                if x.get("carpeta_b") == b:
+                    x["carpeta_b"] = carpeta
+                if x.get("candidatos"):
+                    x["candidatos"] = list(dict.fromkeys(carpeta if c == b else c for c in x["candidatos"]))
+                if x.get("tipo") == "unir" and x.get("carpeta") == x.get("carpeta_b") and x["estado"] == "pendiente":
+                    x["estado"] = "resuelta"
+            _guardar_sesion(ses)
+            return {"ok": True, "pendientes": sum(1 for x in ses["dudas"] if x["estado"] == "pendiente")}
         if si:
             # si la carpeta cambio de nombre en la revision, buscar su nombre actual por dorsal/equipo
             fotos = [duda["foto"]] + ([duda["foto_ref"]] if duda.get("foto_ref") else [])
@@ -460,8 +576,12 @@ async def corregir_carpeta(request: Request):
                           "fotos": len(ALMACEN.listar(f"{PREF_ORG}{nueva}/"))}
         ses["detalle"] = detalle
         for duda in ses.get("dudas", []):   # las dudas pendientes siguen a su jugador
-            if duda["carpeta"] in (carpeta, carpeta_actual):
+            if duda["carpeta"] in (carpeta, carpeta_actual) and duda.get("tipo") != "quien":
                 duda["carpeta"], duda["dorsal"], duda["equipo"] = nueva, dorsal or None, equipo
+            if duda.get("candidatos"):
+                duda["candidatos"] = list(dict.fromkeys(nueva if c in (carpeta, carpeta_actual) else c for c in duda["candidatos"]))
+                if duda["carpeta"] in (carpeta, carpeta_actual):
+                    duda["carpeta"] = nueva
         _guardar_sesion(ses)
         return {"carpeta": nueva, "unida": unida}
 
@@ -490,7 +610,13 @@ async def mover_a_generales(request: Request):
         ses = _leer_sesion()
         ses.get("detalle", {}).pop(carpeta, None)
         for duda in ses.get("dudas", []):
-            if duda["carpeta"] == carpeta and duda["estado"] == "pendiente":
+            if duda.get("candidatos") and carpeta in duda["candidatos"]:
+                duda["candidatos"] = [c for c in duda["candidatos"] if c != carpeta]
+                if not duda["candidatos"] and duda["estado"] == "pendiente":
+                    duda["estado"] = "descartada"
+                elif duda["carpeta"] == carpeta:
+                    duda["carpeta"] = duda["candidatos"][0]
+            elif duda["carpeta"] == carpeta and duda["estado"] == "pendiente":
                 duda["estado"] = "descartada"
         _guardar_sesion(ses)
         return {"ok": True}
@@ -523,9 +649,13 @@ def get_backup_photo(filename: str):
 
 @app.post("/api/procesar")
 def trigger_process(background_tasks: BackgroundTasks, nomina: str = Form("")):
-    if processing_status["is_processing"]:
+    if processing_status["is_processing"] or _estado_vigente().get("is_processing"):
         return JSONResponse({"status": "busy", "message": "Ya hay un proceso en marcha."})
     processing_status["is_processing"] = True   # evita doble clic mientras arranca
+    if not nomina:   # al pulsar "Continuar" tras una interrupcion se reutiliza la nomina original
+        nomina = (_estado_compartido() or {}).get("nomina", "")
+    processing_status["nomina"] = nomina
+    _publicar_estado(forzar=True)
     background_tasks.add_task(process_photos_task, nomina)
     return {"status": "started", "message": "Organizacion biometrica por jugador iniciada."}
 
@@ -535,7 +665,7 @@ def clean_previous_session():
     """Deja todo listo para un partido nuevo (la boveda de respaldo NO se toca)."""
     if not ALMACEN:
         return JSONResponse({"error": "No R2"}, status_code=500)
-    if processing_status["is_processing"]:
+    if processing_status["is_processing"] or _estado_vigente().get("is_processing"):
         return JSONResponse({"error": "Hay un proceso en marcha"}, status_code=409)
     try:
         _limpiar_sesion(borrar_fotos=True)
@@ -552,10 +682,11 @@ async def upload_and_process(background_tasks: BackgroundTasks, files: List[Uplo
     if not ALMACEN:
         return JSONResponse({"error": "R2 no conectado."}, status_code=500)
     if limpiar:
-        if processing_status["is_processing"]:
+        if processing_status["is_processing"] or (await run_in_threadpool(_estado_vigente)).get("is_processing"):
             return JSONResponse({"error": "Hay un proceso en marcha"}, status_code=409)
         await run_in_threadpool(_limpiar_sesion, True)
         processing_status["inicio"] = time.time()
+    sid = await run_in_threadpool(_id_sesion)
     processing_status["fase"] = "subiendo"
     count = 0
     for file in files:
@@ -580,10 +711,11 @@ async def upload_and_process(background_tasks: BackgroundTasks, files: List[Uplo
             return key
 
         key = await run_in_threadpool(guardar)
-        _encolar(key, datos)          # el analisis empieza ya, mientras siguen llegando fotos
+        _encolar(key, datos, sid)     # el analisis empieza ya, mientras siguen llegando fotos
         datos = None
         count += 1
-    processing_status["total_photos"] = len(_tareas)
+    processing_status["total_photos"] = sum(1 for t in _tareas if t.startswith(sid + "/"))
+    await run_in_threadpool(_publicar_estado, True)
     if procesar:
         if not processing_status["is_processing"]:
             processing_status["is_processing"] = True

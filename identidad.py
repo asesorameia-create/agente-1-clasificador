@@ -45,11 +45,32 @@ SIM_SEGURA = 0.56           # coseno SFace "misma persona sin duda" (margen sobr
 DORSAL_SEGURO = 0.97        # lectura de dorsal practicamente sin ambiguedad
 RAFAGA_SEGURA = 0.88        # foto vecina casi identica
 NUMERO_GRANDE = 0.10        # numero >10% de la altura de la persona = numero de espalda
+DIST_COLOR_SEGURA = 0.60    # una union "segura" por cara exige camisetas compatibles
+CARA_PROTAGONISTA = 0.55    # calidad de cara minima para abrir ficha con una sola foto
+ALTURA_PROTAGONISTA = 0.30  # el protagonista ocupa al menos 30% de la altura de la foto
+SIM_PREGUNTAR_UNION = 0.40  # dos fichas con caras parecidas (sin llegar a "seguro"): se pregunta si unirlas
+# "¿Quien es?": sugerencias para protagonistas sin identificar (el fotografo elige con un toque)
+SIM_SUGERIR = 0.40
+DIST_SUGERIR_COLOR = 0.50
+MAX_CANDIDATOS = 3
+
+
+def _es_protagonista(x, analisis) -> bool:
+    """Persona principal de su foto, con cara nitida: suficiente para abrirle ficha aunque salga una vez."""
+    fi, _, j = x[0], x[1], x[2]
+    if j["huella"] is None or j.get("calidad_cara", 0) < CARA_PROTAGONISTA or j["altura"] < ALTURA_PROTAGONISTA:
+        return False
+    alturas = sorted((o["altura"] for o in analisis[fi].get("jugadores", [])), reverse=True)
+    return j["altura"] >= 0.6 * alturas[0] and (len(alturas) < 3 or j["altura"] >= alturas[1] * 0.999)
 
 
 def _numero_sospechoso(j: Dict[str, Any]) -> bool:
     """Numero grande (de espalda) y a la vez cara de frente: tipico de una camiseta sostenida en la mano
     (entrega, celebracion) o de una lectura que no pertenece a esa persona."""
+    if j.get("numero_en_mano"):
+        return True
+    if j.get("fuente_dorsal") == "vision":
+        return False      # Claude confirmo que la camiseta esta puesta
     return bool(j.get("dorsal")) and j.get("alto_dorsal", 0) >= NUMERO_GRANDE and j.get("huella") is not None \
         and j.get("calidad_cara", 0) >= 0.6
 
@@ -143,6 +164,14 @@ def _nombre_equipo(palabras: List[str]) -> Optional[str]:
         if apoyo >= 2:
             return best.capitalize()
     return None
+
+
+def _equipo_por_vision(nombres: List[str]) -> Optional[str]:
+    """Nombre de equipo leido por Claude: se normaliza contra la lista de estados/ciudades si coincide."""
+    if not nombres:
+        return None
+    normal = [(_nombre_equipo([n, n]) or n.strip().title()) for n in nombres if n and n.strip()]
+    return Counter(normal).most_common(1)[0][0] if normal else None
 
 
 class _Grupos:
@@ -293,15 +322,26 @@ def clasificar_lote(analisis: List[Dict[str, Any]], nomina: str = "") -> Dict[st
             grande = max((inst[i][2].get("alto_dorsal", 0) for i in miembros if inst[i][2]["dorsal"] == k), default=0)
             con_cara = any(inst[i][2]["huella"] is not None for i in miembros)
             # visto en 2+ fotos, o una sola vez pero claro (numero de espalda/pecho, o con rostro visible)
-            if (vistas >= 2 and v >= 2 * 0.86) or (v >= 0.97 and k != "1" and (grande >= 0.08 or (con_cara and grande >= 0.05))):
+            por_vision = any(inst[i][2].get("fuente_dorsal") == "vision" and inst[i][2]["dorsal"] == k for i in miembros)
+            if (vistas >= 2 and v >= 2 * 0.86) or (v >= 0.97 and (k != "1" or por_vision)
+                                                    and (grande >= 0.08 or (con_cara and grande >= 0.05))):
                 dorsal = k
-        if dorsal is None and (len(fotos_todas) < 2 or not G.huellas[r]):
-            continue  # vista una sola vez y sin numero confiable: no merece carpeta propia
+        protagonista_solo = None
+        if dorsal is None and len(fotos_todas) < 2:
+            # partidos de 40-50 fotos: un protagonista con cara nitida merece su ficha aunque salga una sola vez
+            cand = [i for i in miembros if _es_protagonista(inst[i], analisis)]
+            if not cand:
+                continue
+            protagonista_solo = max(cand, key=lambda i: inst[i][2]["altura"])
+        elif dorsal is None and not G.huellas[r]:
+            continue
 
         # ----- medidor de certeza: que fotos del grupo tienen prueba SUFICIENTE y cuales son dudosas
         relevante = lambda i: bool(inst[i][2]["dorsal"]) or inst[i][2]["huella"] is not None or inst[i][2]["altura"] >= 0.3
         seguros: set = set()
-        if dorsal:
+        if protagonista_solo is not None:
+            seguros = {protagonista_solo}     # es su propia foto: no hay nada que confundir
+        elif dorsal:
             seguros = {i for i in miembros if inst[i][2]["dorsal"] == dorsal and inst[i][2]["conf_dorsal"] >= DORSAL_SEGURO
                        and not _numero_sospechoso(inst[i][2])}
             if not seguros:   # varias lecturas medianas que coinciden en fotos distintas tambien son prueba
@@ -321,9 +361,11 @@ def clasificar_lote(analisis: List[Dict[str, Any]], nomina: str = "") -> Dict[st
                 if i in seguros:
                     continue
                 hi = inst[i][2]["huella"]
+                # cara muy parecida Y camiseta compatible (candado extra contra gemelos de otro equipo)
                 fuerte = hi is not None and any(
                     inst[s][0] != inst[i][0] and inst[s][2]["huella"] is not None
-                    and float(np.dot(hi, inst[s][2]["huella"])) >= SIM_SEGURA for s in seguros)
+                    and float(np.dot(hi, inst[s][2]["huella"])) >= SIM_SEGURA
+                    and _dist_color(inst[i][2]["color"], inst[s][2]["color"]) <= DIST_COLOR_SEGURA for s in seguros)
                 fuerte = fuerte or any(s in seguros and p >= RAFAGA_SEGURA for s, p in enlaces_rafaga.get(i, []))
                 if fuerte:
                     seguros.add(i)
@@ -347,9 +389,12 @@ def clasificar_lote(analisis: List[Dict[str, Any]], nomina: str = "") -> Dict[st
             continue
         mini, mejor_q = b"", -1.0
         palabras: List[str] = []
+        equipos_v: List[str] = []
         for i in miembros:
             j = inst[i][2]
             palabras += j["palabras"]
+            if j.get("equipo_vision"):
+                equipos_v.append(j["equipo_vision"])
             q = (2.0 if j.get("mini_cara") else 0.0) + j.get("calidad_cara", 0.0) + j["altura"] + (5.0 if i in seguros else 0.0)
             if j["mini"] and q > mejor_q:
                 mini, mejor_q = j["mini"], q
@@ -361,13 +406,16 @@ def clasificar_lote(analisis: List[Dict[str, Any]], nomina: str = "") -> Dict[st
                 d["foto_ref"] = ref["foto"]
             mini = ref["mini"] or mini
         jugadores.append({"dorsal": dorsal, "fotos": fotos_ok, "mini": mini, "color": G.color(r),
-                          "palabras": palabras, "n": len(fotos_ok), "dudas": dudas})
+                          "palabras": palabras, "equipos_v": equipos_v, "n": len(fotos_ok), "dudas": dudas,
+                          "huellas": [inst[i][2]["huella"] for i in seguros if inst[i][2]["huella"] is not None],
+                          "lecturas": {inst[i][2]["dorsal"] for i in miembros if inst[i][2]["dorsal"]},
+                          "miembros": set(miembros)})
 
     # ---------------- 5. equipo: lo leido en la camiseta del jugador; si no, se hereda solo de un
     #                     companero con camiseta casi identica; si no, el color (nunca un nombre inventado)
     portadores = []
     for P in jugadores:
-        P["equipo"] = _nombre_equipo(P["palabras"])
+        P["equipo"] = _equipo_por_vision(P.get("equipos_v", [])) or _nombre_equipo(P["palabras"])
         if P["equipo"] and P["color"] is not None:
             portadores.append((P["equipo"], P["color"]))
     for P in jugadores:
@@ -417,6 +465,7 @@ def clasificar_lote(analisis: List[Dict[str, Any]], nomina: str = "") -> Dict[st
             c = f"{base}_{k}"
             k += 1
         usadas.add(c)
+        P["carpeta"] = c
         if P["fotos"]:
             carpetas[c] = [analisis[fi]["key"] for fi in P["fotos"]]
         if P["mini"]:
@@ -425,7 +474,7 @@ def clasificar_lote(analisis: List[Dict[str, Any]], nomina: str = "") -> Dict[st
         for d in P["dudas"]:
             did = f"d{len(dudas_salida) + 1:04d}"
             dudas_salida.append({
-                "id": did, "carpeta": c, "foto": analisis[d["foto"]]["key"], "motivo": d["motivo"],
+                "id": did, "tipo": "mismo", "carpeta": c, "foto": analisis[d["foto"]]["key"], "motivo": d["motivo"],
                 "foto_ref": analisis[d["foto_ref"]]["key"] if "foto_ref" in d else None,
                 "dorsal": P["dorsal"], "equipo": P["equipo"], "estado": "pendiente",
             })
@@ -436,6 +485,85 @@ def clasificar_lote(analisis: List[Dict[str, Any]], nomina: str = "") -> Dict[st
     for a in analisis:
         if a["key"] not in con_jugador:
             carpetas[GENERAL].append(a["key"])
+
+    # ---------------- 6b. "¿Son la misma persona?": dos fichas con caras parecidas (sin llegar a 'seguro')
+    todas = [P for P in jugadores if P.get("carpeta") and P["fotos"]]
+    fichas = [P for P in todas if P["huellas"]]
+    pares_u = []
+    # pista de numero: ficha sin numero confirmado cuya lectura coincide con un jugador confirmado
+    for B in todas:
+        if B["dorsal"]:
+            continue
+        for A in todas:
+            if A is B or not A["dorsal"] or A["dorsal"] not in B["lecturas"] or set(A["fotos"]) & set(B["fotos"]):
+                continue
+            if A["color"] is None or B["color"] is None or _dist_color(A["color"], B["color"]) <= DIST_UNION_COLOR:
+                pares_u.append((1.5, A, B))
+    for x, A in enumerate(fichas):
+        for B in fichas[x + 1:]:
+            if A["dorsal"] and B["dorsal"]:
+                continue   # dos numeros distintos leidos con seguridad: personas distintas
+            if set(A["fotos"]) & set(B["fotos"]):
+                continue   # aparecen juntos en una foto
+            if A["color"] is not None and B["color"] is not None and _dist_color(A["color"], B["color"]) > DIST_SUGERIR_COLOR:
+                continue
+            s = max(float(np.dot(h1, h2)) for h1 in A["huellas"] for h2 in B["huellas"])
+            if s >= SIM_PREGUNTAR_UNION:
+                pares_u.append((s, A, B))
+    usadas_u = set()
+    for s, A, B in sorted(pares_u, key=lambda t: -t[0]):
+        if A["carpeta"] in usadas_u or B["carpeta"] in usadas_u:
+            continue
+        if (B["dorsal"] and not A["dorsal"]) or (len(B["fotos"]) > len(A["fotos"]) and not A["dorsal"]):
+            A, B = B, A     # se conserva la ficha con numero (o con mas fotos)
+        usadas_u.update({A["carpeta"], B["carpeta"]})
+        dudas_salida.append({
+            "id": f"u{len(dudas_salida) + 1:04d}", "tipo": "unir", "carpeta": A["carpeta"], "carpeta_b": B["carpeta"],
+            "foto": analisis[B["fotos"][0]]["key"], "foto_ref": None, "dorsal": A["dorsal"], "equipo": A["equipo"],
+            "estado": "pendiente",
+            "motivo": (f"En esta ficha se leyó el número {A['dorsal']}" if s >= 1.5
+                       else "Dos fichas con caras parecidas: si son el mismo jugador, se unen"),
+        })
+
+    # ---------------- 7. "¿Quien es?": foto sin carpeta con un protagonista claro -> 3 candidatos para elegir
+    en_duda = {d["foto"] for d in dudas_salida} | {d["foto_ref"] for d in dudas_salida if d.get("foto_ref")}
+    con_carpeta = [P for P in jugadores if P.get("carpeta") and P["fotos"]]
+    generales = set(carpetas.get(GENERAL, []))
+    for fi, a in enumerate(analisis):
+        if a["key"] not in generales or a["key"] in en_duda or not con_carpeta:
+            continue
+        for ji, j in sorted(enumerate(a.get("jugadores", [])), key=lambda t: -t[1]["altura"])[:2]:
+            if j["altura"] < 0.28 and j["huella"] is None:
+                continue
+            cands = []
+            for P in con_carpeta:
+                d = _dist_color(j["color"], P["color"]) if (j["color"] is not None and P["color"] is not None) else 0.5
+                mismo_num = bool(j["dorsal"]) and j["dorsal"] == P["dorsal"]
+                # mismo numero: se tolera camiseta vista de otro lado; solo cara: exige camiseta cercana
+                if d > (DIST_UNION_COLOR if mismo_num else DIST_SUGERIR_COLOR):
+                    continue
+                s = 0.0
+                if j["huella"] is not None and P["huellas"]:
+                    sim = max(float(np.dot(j["huella"], h)) for h in P["huellas"])
+                    if sim >= SIM_SUGERIR:
+                        s += 2.0 * sim
+                if j["dorsal"] and j["dorsal"] == P["dorsal"]:
+                    s += 1.0
+                s += 0.4 * max(0.0, 1.0 - d / 0.5)
+                if s >= 0.8:   # exige cara parecida (>=0.40) o mismo numero: el color solo no basta
+                    cands.append((s, P["carpeta"]))
+            if not cands:
+                continue
+            cands.sort(reverse=True)
+            did = f"q{len(dudas_salida) + 1:04d}"
+            dudas_salida.append({
+                "id": did, "tipo": "quien", "carpeta": cands[0][1], "candidatos": [c for _, c in cands[:MAX_CANDIDATOS]],
+                "foto": a["key"], "foto_ref": None, "dorsal": None, "equipo": None, "estado": "pendiente",
+                "motivo": "Hay un protagonista, pero sin número ni cara seguros: elige quién es",
+            })
+            if j["mini"]:
+                miniaturas[f"_dudas/{did}"] = j["mini"]
+            break   # una sola pregunta por foto
 
     resumen = {
         "fotos": len(analisis),

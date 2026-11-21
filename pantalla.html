@@ -112,6 +112,11 @@
   .duda .no { background: #2a1410; color: #fca5a5; border: 1px solid #7f1d1d !important; }
   .duda .verfoto { display: block; text-align: center; font-size: 12px; color: #fdba74; margin-top: 8px; cursor: pointer; text-decoration: underline; }
   .duda .completa { display: none; width: 100%; border-radius: 10px; margin-top: 8px; }
+  .duda .cands { display: grid; grid-template-columns: repeat(auto-fit, minmax(90px, 150px)); justify-content: center; gap: 8px; margin-top: 10px; }
+  .duda .cand { background: #1a0d09; border: 2px solid #7c2d12; border-radius: 12px; padding: 6px; cursor: pointer; color: #fff;
+    display: flex; flex-direction: column; align-items: center; gap: 4px; font-weight: 800; font-size: 13px; }
+  .duda .cand:hover { border-color: var(--verde); }
+  .duda .cand img { width: 100%; aspect-ratio: 1/1; object-fit: cover; border-radius: 9px; }
   @media (max-width: 420px) { .grid { grid-template-columns: 1fr 1fr; gap: 8px; } .ficha .titulo { font-size: 13px; } }
 </style>
 </head>
@@ -148,6 +153,7 @@
     <div class="estado-titulo" id="estadoTitulo">Preparando...</div>
     <div class="barra"><div id="barra"></div></div>
     <div class="estado-detalle" id="estadoDetalle"></div>
+    <button class="btn-action" id="btnContinuar" onclick="continuar()">▶️ Continuar donde quedó</button>
   </div>
 
   <!-- RESULTADOS -->
@@ -286,12 +292,22 @@ async function leerEstado() {
       $("barra").style.width = "100%";
       $("cardEstado").style.display = "none";
       cargarResultados(d);
-    } else if (d.fase === "error") {
+    } else if (d.fase === "error" || d.fase === "interrumpido") {
       sondear(false);
-      $("estadoTitulo").textContent = "❌ " + (d.current_action || "Ocurrió un error");
-      $("btnSubir").disabled = false; $("btnSubir").textContent = "🔁 Reintentar";
+      $("cardEstado").style.display = "block";
+      $("estadoTitulo").textContent = (d.fase === "interrumpido" ? "⏸️ " : "❌ ") + (d.current_action || "Ocurrió un error");
+      $("estadoDetalle").textContent = d.analizadas ? `${d.analizadas} fotos ya analizadas quedan guardadas.` : "";
+      $("btnContinuar").style.display = "block";
     }
+    if (d.fase !== "error" && d.fase !== "interrumpido") $("btnContinuar").style.display = "none";
   } catch (e) {}
+}
+
+async function continuar() {
+  $("btnContinuar").style.display = "none";
+  $("estadoTitulo").textContent = "Retomando el análisis...";
+  await fetch("/api/procesar", { method: "POST", body: new FormData() });
+  sondear(true);
 }
 
 // ---------- resultados: una ficha por jugador
@@ -365,6 +381,8 @@ function pintarDudas(dudas, folders) {
   caja.innerHTML = `<h3>🔎 Por confirmar (${dudas.length})</h3>
     <div class="exp">El agente no pone en una carpeta nada de lo que no esté seguro. Estas fotos tienen pistas, pero no prueba suficiente: confírmalas con un toque.</div>` +
     dudas.map(dd => {
+      if (dd.tipo === "quien") return tarjetaQuien(dd);
+      if (dd.tipo === "unir") return tarjetaUnir(dd);
       const equipo = esc(String(dd.equipo || "").replace(/_/g, " "));
       const conRef = folders[dd.carpeta] || dd.foto_ref;
       const izq = conRef ? `<img src="/api/miniatura/${encodeURIComponent(dd.carpeta)}" alt="jugador">`
@@ -388,6 +406,59 @@ function pintarDudas(dudas, folders) {
       </div>`;
     }).join("");
 }
+// "¿Quien es?": el agente propone hasta 3 jugadores y el fotografo toca el correcto
+function etiquetaCarpeta(c) {
+  const det = (datosCarpetas.detalle || {})[c] || {};
+  const p = partes(c, det);
+  return (p.dorsal ? `#${p.dorsal}` : (p.nombre || "Sin número")) + (p.equipo ? ` · ${p.equipo}` : "");
+}
+function tarjetaQuien(dd) {
+  const id = esc(dd.id);
+  const cands = (dd.candidatos || []).map(c => `
+    <button class="cand" onclick="elegir_quien('${id}', '${encodeURIComponent(c)}')">
+      <img src="/api/miniatura/${encodeURIComponent(c)}" alt=""><span>${esc(etiquetaCarpeta(c))}</span>
+    </button>`).join("");
+  return `<div class="duda" id="duda-${id}">
+    <div class="par" style="grid-template-columns: 1fr">
+      <div style="max-width:180px;margin:0 auto"><img src="/api/miniatura-duda/${encodeURIComponent(dd.id)}" alt="en esta foto"><div class="etq">En esta foto</div></div>
+    </div>
+    <div class="preg">¿Quién es?</div>
+    <div class="mot">${esc(dd.motivo)}</div>
+    <span class="verfoto" onclick="verCompleta('${id}', '${encodeURIComponent(dd.foto)}')">Ver la foto completa</span>
+    <img class="completa" id="completa-${id}" alt="foto completa">
+    <div class="cands">${cands}</div>
+    <div class="acciones"><button class="no" onclick="responder('${id}', false)">❌ Ninguno de ellos</button></div>
+  </div>`;
+}
+function tarjetaUnir(dd) {
+  const id = esc(dd.id);
+  return `<div class="duda" id="duda-${id}">
+    <div class="par">
+      <div><img src="/api/miniatura/${encodeURIComponent(dd.carpeta)}" alt=""><div class="etq">${esc(etiquetaCarpeta(dd.carpeta))}</div></div>
+      <div class="vs">=?</div>
+      <div><img src="/api/miniatura/${encodeURIComponent(dd.carpeta_b)}" alt=""><div class="etq">${esc(etiquetaCarpeta(dd.carpeta_b))}</div></div>
+    </div>
+    <div class="preg">¿Son el mismo jugador?</div>
+    <div class="mot">${esc(dd.motivo)}</div>
+    <span class="verfoto" onclick="verCompleta('${id}', '${encodeURIComponent(dd.foto)}')">Ver la foto completa</span>
+    <img class="completa" id="completa-${id}" alt="foto completa">
+    <div class="acciones">
+      <button class="si" onclick="responder('${id}', true)">✅ Sí, unir</button>
+      <button class="no" onclick="responder('${id}', false)">❌ No</button>
+    </div>
+  </div>`;
+}
+
+async function elegir_quien(id, carpetaCod) {
+  const carpeta = decodeURIComponent(carpetaCod);
+  const card = $("duda-" + id); if (card) card.style.opacity = 0.4;
+  const r = await fetch("/api/confirmar", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, si: true, carpeta }) });
+  const d = await r.json();
+  if (!r.ok) { aviso("⚠️ " + (d.error || "No se pudo guardar")); if (card) card.style.opacity = 1; return; }
+  aviso("✅ Añadida a " + etiquetaCarpeta(carpeta), 2000);
+  cargarResultados();
+}
+
 function verCompleta(id, foto) {
   const im = $("completa-" + id);
   if (!im.src) im.src = `/api/vista/_original/${foto}`;
@@ -467,6 +538,7 @@ async function abrirRescate() {
   try {
     const d = await (await fetch("/api/estado")).json();
     if (d.is_processing || d.fase === "analizando" || d.fase === "carpetas") { $("cardEstado").style.display = "block"; $("cardSubir").style.display = "none"; sondear(true); }
+    else if (d.fase === "interrumpido" || d.fase === "error") { $("cardSubir").style.display = "none"; leerEstado(); cargarResultados(d); }
     else cargarResultados(d);
   } catch (e) {}
 })();

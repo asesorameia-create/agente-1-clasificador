@@ -45,6 +45,16 @@ MODEL_FILES = {
     "db": "text_detection_en_ppocrv3_2023may.onnx",
     "crnn": "text_recognition_CRNN_EN_2021sep.onnx",
 }
+# Versiones cuantizadas int8 oficiales de OpenCV Zoo: ~4x menos memoria (necesario en Render de 512 MB).
+# MODELOS_LIGEROS=1 activa las que se validaron sin perdida de precision.
+MODEL_FILES_INT8 = {
+    "yolox": "object_detection_yolox_2022nov_int8.onnx",
+    "sface": "face_recognition_sface_2021dec_int8.onnx",
+    "crnn": "text_recognition_CRNN_EN_2022oct_int8.onnx",
+}
+for _k in [k for k in os.getenv("MODELOS_LIGEROS_LISTA", "yolox,sface,crnn").split(",") if k]:
+    if os.getenv("MODELOS_LIGEROS", "0") == "1" and _k in MODEL_FILES_INT8:
+        MODEL_FILES[_k] = MODEL_FILES_INT8[_k]
 
 # ---------------------------------------------------------------- parametros
 LADO_TRABAJO = 2000          # lado mayor de la imagen de trabajo (memoria ~9 MB)
@@ -367,6 +377,37 @@ def _miniatura(img: np.ndarray, x1, y1, x2, y2, lado=160) -> bytes:
     return buf.tobytes() if ok else b""
 
 
+def _fusionar_vision(jugadores: List[Dict[str, Any]], torsos: List[np.ndarray]) -> None:
+    """Combina el lector local con la lectura de Claude (si esta disponible) sobre los protagonistas."""
+    try:
+        import lector_vision
+    except Exception:
+        return
+    if not lector_vision.disponible() or not jugadores:
+        return
+    lect = lector_vision.leer_torsos(torsos[:lector_vision.MAX_TORSOS])
+    for i, r in lect.items():
+        if i >= len(jugadores):
+            continue
+        j = jugadores[i]
+        j["vision"] = True
+        if r.get("equipo"):
+            j["equipo_vision"] = str(r["equipo"])[:40]
+        if not r["camiseta_puesta"] and r["numero"]:
+            j["numero_en_mano"] = True            # p. ej. camiseta entregada en una ceremonia
+        if r["numero_seguro"] and r["camiseta_puesta"]:
+            local = j.get("dorsal")
+            j["dorsal"] = str(r["numero"])
+            j["conf_dorsal"] = 0.99
+            if local != j["dorsal"] or not j.get("alto_dorsal"):
+                j["alto_dorsal"] = max(j.get("alto_dorsal", 0) if local == j["dorsal"] else 0, 0.09)
+            j["fuente_dorsal"] = "vision"
+        elif j.get("dorsal") and j.get("conf_dorsal", 0) < 0.97:
+            # Claude no ve un numero legible: la lectura local dudosa se descarta
+            j["dorsal"], j["conf_dorsal"] = None, 0.0
+            j.pop("firma_numero", None)
+
+
 # ================================================================ analisis por foto
 def analizar_foto(img_bytes: bytes, nombre: str = "") -> Dict[str, Any]:
     """Extrae la 'huella' de cada jugador visible en una foto."""
@@ -393,6 +434,7 @@ def analizar_foto(img_bytes: bytes, nombre: str = "") -> Dict[str, Any]:
         gray_full = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         ganancias = _ganancias_blanco(img)
         caras_usadas = set()
+        torsos_vision: List[np.ndarray] = []   # solo del cuello hacia abajo: las caras no salen del servidor
         for n_p, (x1, y1, x2, y2, sc) in enumerate(relevantes):
             ph, pw = y2 - y1, x2 - x1
             jug: Dict[str, Any] = {
@@ -515,7 +557,12 @@ def analizar_foto(img_bytes: bytes, nombre: str = "") -> Dict[str, Any]:
                     jug["mini"] = _miniatura(img, bx1, by1, bx1 + rw, by1 + rh)
             if not jug["mini"]:
                 jug["mini"] = _miniatura(img, x1, y1, x2, y1 + int(0.45 * ph))
+            # torso para el lector de vision (sin cabeza)
+            top = int(fbox[1] + 1.15 * fbox[3]) if fbox is not None else y1 + int(0.18 * ph)
+            top = max(y1, min(top, y1 + int(0.4 * ph)))
+            torsos_vision.append(img[top:max(top + 1, y2 - int(0.08 * ph)), max(0, x1 - pad):min(W, x2 + pad)].copy())
             res["jugadores"].append(jug)
+        _fusionar_vision(res["jugadores"], torsos_vision)
         # un mismo numero fisico no puede pertenecer a dos personas solapadas de la foto
         js = [j for j in res["jugadores"] if j.get("_num_xy")]
         for a in range(len(js)):
