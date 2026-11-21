@@ -734,11 +734,13 @@ async def upload_and_process(background_tasks: BackgroundTasks, files: List[Uplo
     return {"status": "ok", "uploaded": count, "message": f"{count} fotos subidas."}
 
 
-def _armar_zip(prefijo: str, renombrar) -> str:
+def _armar_zip(prefijo: str, renombrar, extras: Optional[List[tuple]] = None) -> str:
     fd, ruta = tempfile.mkstemp(suffix=".zip")
     os.close(fd)
     with zipfile.ZipFile(ruta, "w", zipfile.ZIP_STORED, allowZip64=True) as zf:   # JPG ya va comprimido
         ahora = time.localtime()[:6]          # fecha real (sin esto Windows muestra 1899/1980)
+        for nombre, datos in (extras or []):
+            zf.writestr(zipfile.ZipInfo(nombre, date_time=ahora), datos)
         for key, _ in ALMACEN.listar(prefijo):
             info = zipfile.ZipInfo(renombrar(key), date_time=ahora)
             info.compress_type = zipfile.ZIP_STORED
@@ -747,13 +749,52 @@ def _armar_zip(prefijo: str, renombrar) -> str:
     return ruta
 
 
+def _fichas_visuales() -> List[tuple]:
+    """Para no abrir carpeta por carpeta: '00_ROSTRO.jpg' dentro de cada carpeta de jugador y
+    un indice '00_INDICE_JUGADORES.jpg' con todas las caras y el nombre de su carpeta."""
+    carpetas = sorted({k.split("/")[1] for k, _ in ALMACEN.listar(PREF_ORG) if k.count("/") >= 2})
+    extras, tarjetas = [], []
+    for c in carpetas:
+        if c == GENERAL:
+            continue
+        try:
+            jpg = ALMACEN.leer(f"{PREF_MINI}{c}.jpg")
+        except Exception:
+            continue
+        extras.append((f"{c}/00_ROSTRO.jpg", jpg))
+        img = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            continue
+        img = cv2.resize(img, (220, 220), interpolation=cv2.INTER_AREA)
+        t = cv2.copyMakeBorder(img, 0, 46, 0, 0, cv2.BORDER_CONSTANT, value=(20, 10, 7))
+        etiqueta = c.replace("_", " ")
+        cv2.putText(t, etiqueta[:20], (6, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+        if len(etiqueta) > 20:
+            cv2.putText(t, etiqueta[20:40], (6, 259), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (170, 170, 170), 1, cv2.LINE_AA)
+        tarjetas.append(cv2.copyMakeBorder(t, 6, 6, 6, 6, cv2.BORDER_CONSTANT, value=(11, 5, 4)))
+    if tarjetas:
+        cols = 5
+        while len(tarjetas) % cols:
+            tarjetas.append(np.full_like(tarjetas[0], 11))
+        filas = [np.hstack(tarjetas[i:i + cols]) for i in range(0, len(tarjetas), cols)]
+        ok, buf = cv2.imencode(".jpg", np.vstack(filas), [cv2.IMWRITE_JPEG_QUALITY, 88])
+        if ok:
+            extras.insert(0, ("00_INDICE_JUGADORES.jpg", buf.tobytes()))
+    return extras
+
+
 @app.get("/api/descargar-zip")
 def download_all_zip():
     """ZIP con una carpeta por jugador. Se arma en disco (no en RAM) para aguantar partidos grandes.
     La sesion NO se borra al descargar: si la descarga falla se puede repetir; se limpia al empezar otro partido."""
     if not ALMACEN:
         return JSONResponse({"error": "No R2"}, status_code=500)
-    ruta = _armar_zip(PREF_ORG, lambda k: k[len(PREF_ORG):])
+    try:
+        extras = _fichas_visuales()
+    except Exception as e:
+        logger.warning("No se pudo armar el indice de caras: %s", e)
+        extras = []
+    ruta = _armar_zip(PREF_ORG, lambda k: k[len(PREF_ORG):], extras)
     logger.info("ZIP generado: %s bytes", os.path.getsize(ruta))
     return FileResponse(ruta, media_type="application/zip", filename="Fotos_Organizadas_CastilloEnfoca.zip",
                         background=BackgroundTask(os.remove, ruta))
