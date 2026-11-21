@@ -1,7 +1,26 @@
-# Agente 1 Clasificador — estado y pendientes (21 nov 2026, 08:10)
+# >>> RETOMAR AQUI (21 nov 2026, ~14:30) <<<
+Pídele a Claude: "Lee PENDIENTES.md del agente1-clasificador y continúa desde 'RETOMAR AQUI'."
 
-## >>> DONDE RETOMAR EN LA PROXIMA SESION <<<
-Pídele a Claude: "Lee PENDIENTES.md del agente1-clasificador y continúa desde 'Siguiente paso'."
+## Estado en Render: commit ca9c7f6 (activo)
+- Estable: 1 sola copia del servidor + trabajador aislado (trabajador.py) + vigilante permanente (retoma partidos
+  huérfanos) + reintentos de subida. 0 caídas en las últimas pruebas. Memoria ~3 GB de 4.
+- Lectores: jurado escalonado CRNN + SmolVLM (siempre) + Florence (desempata). Una cifra exige 2 lectores.
+- Identidad: exige 2 pruebas (número+camiseta, número+cara, cara+cara). Caras distintas nunca se unen.
+- Filtros: nitidez >= 55, parecido a cara >= 0.20, recuadros duplicados fuera, fotos repetidas por sha1.
+- ZIP: Equipo_X/Jugador o Dorsal, índice de caras por equipo, Otros_jugadores, Generales.
+- Tiempo medido: 61 fotos = 10,4 min total (subida desde el navegador incluida).
+
+## Resultados de auditoría visual (todas las carpetas)
+- Vuelta 1 (antes de causa raíz): 3 mezclas de 12 carpetas multi-foto (5 por logo R5/15, 6 de 3 equipos, 10 de 2).
+- Vuelta 2 (c157a76): 0 mezclas en 50 carpetas, 0 números inventados. Fallos restantes: misma persona en 2
+  carpetas desde la misma foto, brazo tatuado como cara, 3 caras borrosas -> corregidos en ca9c7f6 (sin verificar en vivo).
+- Vuelta 3 (ca9c7f6): EN CURSO al cerrar.
+
+## Siguiente paso
+1. Terminar vuelta 3: prueba como el fotógrafo (pantalla celular), ZIP en Descargas\Proyectop Fotografia   PRUEBA_ZIP_AGENTE_borrar_despues, auditoría con scratchpad/auditar_zip.py (hojas en scratchpad/out/auditoria).
+2. SigLIP2 para separar equipos (Equipo_A sigue mezclando 5 equipos) + huella de cuerpo de espaldas.
+3. Velocidad: SmolVLM solo a jugadores nítidos sin número seguro; copia liviana primero.
+4. Números de una cifra perdidos (16 vs 21 con número): buscar 2º lector que confirme sin inventar.
 
 ## >>> RETOMAR AQUI (21 nov 2026, ~08:50, sesion agotada) <<<
 Pídele a Claude: "Lee PENDIENTES.md del agente1-clasificador y continúa desde 'RETOMAR AQUI'."
