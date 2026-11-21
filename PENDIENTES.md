@@ -1,20 +1,33 @@
-# Agente 1 Clasificador — estado y pendientes (21 nov 2026)
+# Agente 1 Clasificador — estado y pendientes (21 nov 2026, 08:10)
 
 ## >>> DONDE RETOMAR EN LA PROXIMA SESION <<<
-Pídele a Claude: "Lee PENDIENTES.md del agente1-clasificador y continúa desde el paso 2."
+Pídele a Claude: "Lee PENDIENTES.md del agente1-clasificador y continúa desde 'Siguiente paso'."
 
-Estado al cerrar (21 nov 2026, ~01:00):
-- EN VIVO y funcionando: commit 86b4336 (sin Florence-2). No se ha publicado nada después.
-- EN LOCAL, SIN PUBLICAR (sin commit):
-  - `lector_florence.py` (nuevo): lector Florence-2 local.
-  - `motor_biometrico.py`: función `_votar_florence` (jurado CRNN + Florence-2 con reglas de votación).
-  - `identidad.py`: función `equipos_en_texto` (nombres de equipo dentro del texto OCR).
-  - Falta: probarlo con las 20 + 40 fotos, añadir torch/transformers al Dockerfile y requirements, publicar.
-- Resultado del jurado en casos difíciles (Florence-2 base con 4 variantes de imagen): no rescató
-  ninguno de los 6 primeros (4 Caracas, 6 Apure, 8 La Guaira espaldas, 14 Sucre, 3 y 6 rojos de Trujillo).
-  Conclusión: para números rojos grandes de espaldas hace falta la "huella visual del dorsal" (paso 4),
-  no más lectores de texto.
-- Verificado: torch 2.14.1+cpu y transformers 5.20.2 instalan en Python 3.10 Linux (Render).
+### Hecho y subido a GitHub (main)
+- 05f12be Florence-2 + votación · f8cfa01 índice de caras en el ZIP (00_INDICE_JUGADORES.jpg + 00_ROSTRO.jpg por carpeta).
+- 59b4880 PRIVACIDAD: las huellas faciales se borran al terminar cada partido (nube y memoria). /api/diagnostico
+  muestra "huellas_guardadas" (debe ser 0 tras terminar). Cuadrícula "Ponle número a cada cara" solo como respaldo.
+- 630ff4e arreglo del Dockerfile: 05f12be y f8cfa01 FALLARON al construir en Render (pip rechazaba metadatos de
+  typing-extensions del índice de pytorch). Render siguió con 5489212 (funciona). Revisar que 630ff4e quede "live".
+
+### Decisión del usuario (no negociable)
+- NADA de banco de caras entre partidos (riesgo legal/extorsión en Venezuela, menores). Cero datos biométricos guardados.
+- El agente debe nombrar las carpetas solo; el trabajo manual no es solución.
+
+### Diagnóstico clave (medido hoy)
+- En las carpetas "sin número" el número SÍ se ve grande y claro en muchas fotos (8 La Guaira, 3/6/10 Trujillo
+  rojos, 4 Caracas, 6 Apure). El fallo es del LECTOR, no de las fotos. Hojas: scratchpad/out/sin_num_cliente_*.jpg.
+- Florence-2 base y PP-OCR (RapidOCR) NO leen esos números ni con recorte justo (ver scratchpad/exp_tight.py,
+  exp_rapid2.py). Son lectores de texto: ignoran un número grande y decorado.
+- En prueba: SmolVLM-256M-Instruct (Apache 2.0) preguntando "¿qué número tiene la camiseta?" (exp_smol.py).
+
+### Siguiente paso
+1. Lector de números que SÍ lea dígitos grandes decorados. Opciones a medir sobre out/tight/*.jpg:
+   a) SmolVLM-256M/500M (preguntar el número; desactivar división de imagen para velocidad).
+   b) Clasificador de dígitos entrenado (estilo SVHN) sobre el recorte del número.
+   Aceptar solo si acierta los casos de out/tight sin inventar números en recortes sin número.
+2. Integrarlo como 3er votante en _votar_florence (motor_biometrico.py) y medir 20 + 40 fotos.
+3. Probar en Render en vivo con las 20 fotos del cliente.
 
 ## En vivo (commit 86b4336, Render 2 CPU / 4 GB, 85 USD/mes)
 - Motor biométrico: YOLOX (personas) + YuNet/SFace (huella facial) + PP-OCR DB + CRNN (dorsales) + color/texto (equipo).
