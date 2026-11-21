@@ -17,6 +17,7 @@ import time
 import uuid
 import pickle
 import zipfile
+from collections import defaultdict
 import logging
 import tempfile
 import threading
@@ -605,6 +606,7 @@ async def corregir_carpeta(request: Request):
     def mover():
         ses = _leer_sesion()
         detalle = ses.get("detalle", {})
+        grupo_prev = (detalle.get(carpeta) or {}).get("grupo", "")   # sigue en su equipo dentro del ZIP
         unida = False
         # si ya hay otra ficha con el mismo numero y equipo, es el mismo jugador: se unen en una sola
         if dorsal:
@@ -624,6 +626,7 @@ async def corregir_carpeta(request: Request):
             _mover_carpeta(carpeta_actual, nueva)
             detalle.pop(carpeta_actual, None)
         detalle[nueva] = {"equipo": equipo, "dorsal": dorsal or None, "nombre": nombre or None, "revisada": True,
+                          "grupo": grupo_prev,
                           "fotos": len(ALMACEN.listar(f"{PREF_ORG}{nueva}/"))}
         ses["detalle"] = detalle
         for duda in ses.get("dudas", []):   # las dudas pendientes siguen a su jugador
@@ -799,11 +802,50 @@ def _armar_zip(prefijo: str, renombrar, extras: Optional[List[tuple]] = None) ->
     return ruta
 
 
+def _ruta_equipo() -> Dict[str, str]:
+    """MENOS ES MAS: cada carpeta de jugador va dentro de la carpeta de su equipo en el ZIP."""
+    try:
+        det = _leer_sesion().get("detalle", {})
+    except Exception:
+        det = {}
+    rutas = {}
+    for c, d in det.items():
+        g = identidad.limpiar_nombre(str(d.get("grupo") or d.get("equipo") or ""))
+        rutas[c] = (g if g.startswith("Equipo_") else f"Equipo_{g}") if g else "Otros_jugadores"
+    return rutas
+
+
+def _en_equipo(rutas: Dict[str, str], carpeta: str) -> str:
+    if carpeta == GENERAL:
+        return carpeta
+    eq = rutas.get(carpeta, "Otros_jugadores")
+    corto = carpeta
+    for suf in (f"_{eq}", f"_{eq[len('Equipo_'):]}" if eq.startswith("Equipo_") else None):
+        if suf and corto.endswith(suf) and len(corto) > len(suf):
+            corto = corto[:-len(suf)]          # dentro de 'Equipo_Caracas' basta 'Dorsal_08'
+            break
+    return f"{eq}/{corto}"
+
+
+def _tarjetas_a_jpg(tarjetas: List[np.ndarray]) -> Optional[bytes]:
+    if not tarjetas:
+        return None
+    cols = 5
+    tarjetas = list(tarjetas)
+    while len(tarjetas) % cols:
+        tarjetas.append(np.full_like(tarjetas[0], 11))
+    filas = [np.hstack(tarjetas[i:i + cols]) for i in range(0, len(tarjetas), cols)]
+    ok, buf = cv2.imencode(".jpg", np.vstack(filas), [cv2.IMWRITE_JPEG_QUALITY, 88])
+    return buf.tobytes() if ok else None
+
+
 def _fichas_visuales() -> List[tuple]:
-    """Para no abrir carpeta por carpeta: '00_ROSTRO.jpg' dentro de cada carpeta de jugador y
-    un indice '00_INDICE_JUGADORES.jpg' con todas las caras y el nombre de su carpeta."""
+    """Para no abrir carpeta por carpeta: '00_ROSTRO.jpg' dentro de cada carpeta de jugador (Windows la muestra
+    en el icono de la carpeta), un indice de caras por equipo y uno general con el nombre de cada carpeta."""
+    rutas = _ruta_equipo()
     carpetas = sorted({k.split("/")[1] for k, _ in ALMACEN.listar(PREF_ORG) if k.count("/") >= 2})
-    extras, tarjetas = [], []
+    extras, todas = [], []
+    por_equipo: Dict[str, List[np.ndarray]] = defaultdict(list)
     for c in carpetas:
         if c == GENERAL:
             continue
@@ -811,7 +853,7 @@ def _fichas_visuales() -> List[tuple]:
             jpg = ALMACEN.leer(f"{PREF_MINI}{c}.jpg")
         except Exception:
             continue
-        extras.append((f"{c}/00_ROSTRO.jpg", jpg))
+        extras.append((f"{_en_equipo(rutas, c)}/00_ROSTRO.jpg", jpg))
         img = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
         if img is None:
             continue
@@ -821,15 +863,16 @@ def _fichas_visuales() -> List[tuple]:
         cv2.putText(t, etiqueta[:20], (6, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
         if len(etiqueta) > 20:
             cv2.putText(t, etiqueta[20:40], (6, 259), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (170, 170, 170), 1, cv2.LINE_AA)
-        tarjetas.append(cv2.copyMakeBorder(t, 6, 6, 6, 6, cv2.BORDER_CONSTANT, value=(11, 5, 4)))
-    if tarjetas:
-        cols = 5
-        while len(tarjetas) % cols:
-            tarjetas.append(np.full_like(tarjetas[0], 11))
-        filas = [np.hstack(tarjetas[i:i + cols]) for i in range(0, len(tarjetas), cols)]
-        ok, buf = cv2.imencode(".jpg", np.vstack(filas), [cv2.IMWRITE_JPEG_QUALITY, 88])
-        if ok:
-            extras.insert(0, ("00_INDICE_JUGADORES.jpg", buf.tobytes()))
+        t = cv2.copyMakeBorder(t, 6, 6, 6, 6, cv2.BORDER_CONSTANT, value=(11, 5, 4))
+        todas.append(t)
+        por_equipo[rutas.get(c, "Otros_jugadores")].append(t)
+    for eq, ts in por_equipo.items():
+        jpg = _tarjetas_a_jpg(ts)
+        if jpg:
+            extras.insert(0, (f"{eq}/00_INDICE_{eq.upper()}.jpg", jpg))
+    jpg = _tarjetas_a_jpg(todas)
+    if jpg:
+        extras.insert(0, ("00_INDICE_JUGADORES.jpg", jpg))
     return extras
 
 
@@ -844,7 +887,14 @@ def download_all_zip():
     except Exception as e:
         logger.warning("No se pudo armar el indice de caras: %s", e)
         extras = []
-    ruta = _armar_zip(PREF_ORG, lambda k: k[len(PREF_ORG):], extras)
+    rutas = _ruta_equipo()
+
+    def renombrar(k: str) -> str:
+        rel = k[len(PREF_ORG):]
+        carpeta, _, archivo = rel.partition("/")
+        return f"{_en_equipo(rutas, carpeta)}/{archivo}"
+
+    ruta = _armar_zip(PREF_ORG, renombrar, extras)
     logger.info("ZIP generado: %s bytes", os.path.getsize(ruta))
     return FileResponse(ruta, media_type="application/zip", filename="Fotos_Organizadas_CastilloEnfoca.zip",
                         background=BackgroundTask(os.remove, ruta))

@@ -61,7 +61,8 @@ LADO_TRABAJO = 2000          # lado mayor de la imagen de trabajo (memoria ~9 MB
 LADO_CARAS = 1280            # lado mayor para buscar caras
 PERSONA_MIN_SCORE = 0.45
 PERSONA_MIN_ALTURA = 0.16    # fraccion de la altura de la foto para considerar a un jugador
-MAX_PERSONAS = 5
+MAX_PERSONAS = int(os.getenv("MAX_PERSONAS", "16"))   # fotos de grupo: nadie se queda fuera
+PERSONAS_SIEMPRE = 5         # las 5 mas grandes siempre; de la 6a en adelante, solo si se le ve la cara
 ALTURA_RECORTE = 800         # el recorte de cada jugador se lleva a esta altura para leer el dorsal
 YOLO_LADO = int(os.getenv("YOLO_LADO", "416"))  # entrada del detector de personas (multiplo de 32)
 DORSAL_MIN_CONF = 0.86
@@ -589,6 +590,8 @@ def analizar_foto(img_bytes: bytes, nombre: str = "") -> Dict[str, Any]:
                     except cv2.error:
                         pass
 
+            if n_p >= PERSONAS_SIEMPRE and jug["huella"] is None:
+                continue          # persona pequena de fondo sin cara: no aporta y gasta tiempo
             # ---- color de camiseta: justo debajo de la cara (si se ve) o centro del torso
             if fbox is not None:
                 fx, fy, fw, fh = fbox

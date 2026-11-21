@@ -42,6 +42,10 @@ DIST_MISMA_FOTO = 0.35      # companero de la misma foto (misma luz): basta una 
 RAFAGA_SEG = 2.0
 
 # Medidor de certeza: solo lo que supera estos umbrales entra solo a la carpeta; lo demas se pregunta.
+DIST_FIRMA_DISTINTA = 25.0  # cifra claramente de otro color (Delta E): mismo numero, otra camiseta
+SIM_CARAS_DISTINTAS = 0.30  # por debajo, dos rostros son de personas distintas (SFace)
+CARA_SUELTO = 0.40          # calidad minima de cara para dar carpeta a quien sale una sola vez
+DIST_EQUIPO_GRUPO = 0.40    # camisetas del mismo equipo dentro del partido
 SIM_SEGURA = 0.56           # coseno SFace "misma persona sin duda" (margen sobre FAR 1e-5 = 0.472 en LFW)
 DORSAL_SEGURO = 0.97        # lectura de dorsal practicamente sin ambiguedad
 RAFAGA_SEGURA = 0.88        # foto vecina casi identica
@@ -272,6 +276,45 @@ class _Grupos:
         return float(top.mean())
 
 
+
+def _agrupar_equipos(jugadores: List[Dict[str, Any]]) -> None:
+    """Agrupa a los jugadores del partido por camiseta (dentro del partido, misma luz). Cada grupo toma el
+    nombre de equipo leido por sus miembros; si nadie lo leyo, 'Equipo_A', 'Equipo_B'... Los 'sueltos'
+    (una foto, sin numero) solo se quedan si su camiseta es de un equipo con 2+ jugadores."""
+    fijos = sorted([P for P in jugadores if not P.get("suelto") and P["color"] is not None], key=lambda P: -P["n"])
+    centros: List[List[Any]] = []          # [color_medio, miembros]
+    for P in fijos:
+        mejor, md = None, DIST_EQUIPO_GRUPO
+        for c in centros:
+            d = _dist_color(P["color"], c[0])
+            if d <= md:
+                mejor, md = c, d
+        if mejor is None:
+            centros.append([np.array(P["color"], dtype=np.float32), [P]])
+        else:
+            mejor[1].append(P)
+            mejor[0] = np.mean([np.asarray(x["color"], dtype=np.float32) for x in mejor[1]], axis=0)
+    centros.sort(key=lambda c: -len(c[1]))     # todo jugador fijo tiene equipo (aunque su equipo salga poco)
+    usados, letra = set(), 0
+    for c in centros:
+        nombres = Counter(P["equipo"] for P in c[1] if P["equipo"])
+        nombre = next((n for n, _ in nombres.most_common() if n not in usados), None)
+        if not nombre:
+            nombre = f"Equipo_{chr(65 + letra)}"
+            letra += 1
+        usados.add(nombre)
+        c.append(nombre)
+        for P in c[1]:
+            P["grupo"] = nombre
+    grandes = [c for c in centros if len(c[1]) >= 2]   # un 'suelto' solo entra a un equipo con 2+ jugadores
+    for P in jugadores:
+        if P.get("grupo") or P["color"] is None or not grandes:
+            continue
+        d, c = min(((_dist_color(P["color"], c[0]), c) for c in grandes), key=lambda x: x[0])
+        if d <= (DIST_EQUIPO_GRUPO - 0.05 if P.get("suelto") else DIST_EQUIPO_GRUPO):
+            P["grupo"] = c[2]
+
+
 def clasificar_lote(analisis: List[Dict[str, Any]], nomina: str = "") -> Dict[str, Any]:
     """
     analisis: resultados de motor_biometrico.analizar_foto() con clave 'key' (ruta en R2).
@@ -287,12 +330,19 @@ def clasificar_lote(analisis: List[Dict[str, Any]], nomina: str = "") -> Dict[st
             ja, jb = inst[a][2], inst[b][2]
             if ja["dorsal"] != jb["dorsal"]:
                 continue
+            # REGLA: mismo numero dentro del partido = el mismo jugador (en un equipo no se repiten numeros),
+            # SALVO prueba de que son personas distintas: caras distintas, cifra de otro color, otro equipo escrito.
             dn = dist_firma_numero(ja.get("firma_numero"), jb.get("firma_numero"))
-            # mismo numero con los mismos colores de cifra/fondo (misma camiseta), o camisetas casi identicas
-            # sin firma del numero, el color solo no basta (camisetas parecidas de otro equipo): exige la misma cara
-            caras_ok = ja["huella"] is not None and jb["huella"] is not None                 and float(np.dot(ja["huella"], jb["huella"])) >= SIM_UNIR_A_DORSAL
-            if dn <= DIST_FIRMA_NUMERO or (dn >= 999 and _dist_color(ja["color"], jb["color"]) <= DIST_EQUIPO and caras_ok):
-                G.unir(a, b)
+            if dn < 999 and dn > DIST_FIRMA_DISTINTA:
+                continue                                    # cifra de otro color/estilo: otra camiseta
+            ea, eb = _nombre_equipo(ja["palabras"]), _nombre_equipo(jb["palabras"])
+            if ea and eb and ea != eb:
+                continue                                    # equipos escritos distintos
+            ra, rb = G.raiz(a), G.raiz(b)
+            ha, hb = G.huellas[ra], G.huellas[rb]
+            if ha and hb and float((np.array(ha) @ np.array(hb).T).max()) < SIM_CARAS_DISTINTAS:
+                continue                                    # el rostro dice que son dos personas
+            G.unir(a, b)                                    # (unir() ademas bloquea: misma foto, camiseta muy distinta)
 
     # ---------------- 2. biometria facial: pares de mayor a menor similitud
     con_cara = [i for i, x in enumerate(inst) if x[2]["huella"] is not None]
@@ -365,12 +415,19 @@ def clasificar_lote(analisis: List[Dict[str, Any]], nomina: str = "") -> Dict[st
                                                     and (grande >= 0.08 or (con_cara and grande >= 0.05))):
                 dorsal = k
         protagonista_solo = None
+        suelto = False
         if dorsal is None and len(fotos_todas) < 2:
             # partidos de 40-50 fotos: un protagonista con cara nitida merece su ficha aunque salga una sola vez
             cand = [i for i in miembros if _es_protagonista(inst[i], analisis)]
             if not cand:
-                continue
-            protagonista_solo = max(cand, key=lambda i: inst[i][2]["altura"])
+                # NADIE FUERA: con cara visible tambien recibe carpeta (fotos de grupo, segundo plano);
+                # mas abajo se descarta si su camiseta no es de ningun equipo del partido (publico, tecnicos)
+                cand = [i for i in miembros if inst[i][2]["huella"] is not None
+                        and inst[i][2].get("calidad_cara", 0) >= CARA_SUELTO]
+                if not cand:
+                    continue
+                suelto = True
+            protagonista_solo = max(cand, key=lambda i: inst[i][2]["calidad_cara"] if suelto else inst[i][2]["altura"])
         elif dorsal is None and not G.huellas[r]:
             continue
 
@@ -447,7 +504,7 @@ def clasificar_lote(analisis: List[Dict[str, Any]], nomina: str = "") -> Dict[st
                           "palabras": palabras, "equipos_v": equipos_v, "n": len(fotos_ok), "dudas": dudas,
                           "huellas": [inst[i][2]["huella"] for i in seguros if inst[i][2]["huella"] is not None],
                           "lecturas": {inst[i][2]["dorsal"] for i in miembros if inst[i][2]["dorsal"]},
-                          "miembros": set(miembros)})
+                          "miembros": set(miembros), "suelto": suelto})
 
     # ---------------- 5. equipo: lo leido en la camiseta del jugador; si no, se hereda de un companero
     #                     DE LA MISMA FOTO con la misma camiseta (misma luz, mismo partido); si no, de un
@@ -493,6 +550,10 @@ def clasificar_lote(analisis: List[Dict[str, Any]], nomina: str = "") -> Dict[st
                         mejor, md = n, d
         P["equipo"] = mejor or ""
 
+    # ---------------- 5c. equipos del partido por camiseta: MENOS ES MAS (el ZIP se ordena Equipo > Jugador)
+    _agrupar_equipos(jugadores)
+    jugadores = [P for P in jugadores if not (P.get("suelto") and not P.get("grupo"))]
+
     # ---------------- 6. nombres de carpeta (unicos), con nomina opcional
     nom = parsear_nomina(nomina)
 
@@ -523,6 +584,8 @@ def clasificar_lote(analisis: List[Dict[str, Any]], nomina: str = "") -> Dict[st
             n_anon[P["equipo"]] += 1
             c = f"Jugador_{n_anon[P['equipo']]:02d}{eq}"
         base, k = c, 2
+        if c in usadas and P.get("grupo") and not P["equipo"]:
+            c = f"{base}_{limpiar_nombre(P['grupo'])}"      # dos #8 de equipos distintos: lo dice el nombre
         while c in usadas:
             c = f"{base}_{k}"
             k += 1
@@ -534,7 +597,7 @@ def clasificar_lote(analisis: List[Dict[str, Any]], nomina: str = "") -> Dict[st
             miniaturas[c] = P["mini"]
         sugerido = None if P["dorsal"] else (sorted(P.get("lecturas") or [])[:1] or [None])[0]
         detalle[c] = {"equipo": P["equipo"], "dorsal": P["dorsal"], "nombre": nombre, "fotos": len(P["fotos"]),
-                      "sugerido": sugerido}
+                      "sugerido": sugerido, "grupo": P.get("grupo") or ""}
         for d in P["dudas"]:
             did = f"d{len(dudas_salida) + 1:04d}"
             dudas_salida.append({
@@ -567,6 +630,8 @@ def clasificar_lote(analisis: List[Dict[str, Any]], nomina: str = "") -> Dict[st
     for x, A in enumerate(todas):
         for B in todas[x + 1:]:
             if A["dorsal"] and A["dorsal"] == B["dorsal"] and not (set(A["fotos"]) & set(B["fotos"])):
+                if A.get("grupo") and B.get("grupo") and A["grupo"] != B["grupo"]:
+                    continue        # mismo numero en equipos distintos: no hay nada que preguntar
                 pares_u.append((1.6, A, B))
     for x, A in enumerate(fichas):
         for B in fichas[x + 1:]:
