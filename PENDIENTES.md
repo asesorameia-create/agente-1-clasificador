@@ -23,6 +23,13 @@ Pídele a Claude: "Lee PENDIENTES.md del agente1-clasificador y continúa desde 
   tiene número y no cara, otra tiene cara y no número, y sus cajas se solapan (IoU > 0.3 o la menor está >60 % dentro),
   tratarlas como la misma persona (hoy el candado 'misma foto = personas distintas' lo impide). Agregar el caso a pruebas/.
 
+## Publicado al cierre: 84e4560 (SIN prueba en vivo todavía)
+- Caras repartidas por cercanía a la cabeza (antes por tamaño: el #4 de espaldas tomaba la cara de otro jugador).
+- Caras buscadas a 2000 px (antes 1280: en fotos de grupo ~40 px, calidad < 0.40, sin carpeta).
+- Verificado solo con DSC_3079 en local: centro, cabeceador y saltador ahora con cara; #4 y #13 de espaldas sin cara (correcto).
+- PRIMER PASO de la próxima sesión: vuelta 4 como el fotógrafo + ZIP + auditoría. Revisar que DSC_3079 aparezca en las
+  carpetas de todos sus jugadores visibles, que no haya mezclas nuevas y que el tiempo siga en <= 15 min.
+
 ## Siguiente paso
 1. Terminar vuelta 3: prueba como el fotógrafo (pantalla celular), ZIP en Descargas\Proyectop Fotografia   PRUEBA_ZIP_AGENTE_borrar_despues, auditoría con scratchpad/auditar_zip.py (hojas en scratchpad/out/auditoria).
 2. SigLIP2 para separar equipos (Equipo_A sigue mezclando 5 equipos) + huella de cuerpo de espaldas.
