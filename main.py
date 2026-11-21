@@ -341,6 +341,13 @@ def process_photos_task(nomina: str = ""):
         processing_status["duracion_seg"] = int(time.time() - processing_status["inicio"])
         _guardar_sesion({"resumen": res["resumen"], "detalle": res["detalle"], "dudas": res["dudas"], "nomina": nomina,
                          "fotos": len(keys), "fecha": time.strftime("%Y-%m-%d %H:%M")})
+        # privacidad: las huellas faciales solo existen mientras se arma el partido. Al terminar se borran
+        # de la nube y de la memoria; quedan solo las fotos y los nombres de carpeta. Nada biometrico persiste.
+        ALMACEN.borrar_prefijo(PREF_ANALISIS)
+        with _lock:
+            for k in keys:
+                _tareas.pop(f"{sid}/{k}", None)
+        analisis = None
         processing_status["fase"] = "listo"
         processing_status["last_run"] = time.strftime("%Y-%m-%d %H:%M:%S")
         processing_status["is_processing"] = False
@@ -367,7 +374,9 @@ def health():
 @app.get("/api/diagnostico")
 def diagnostico():
     return {"almacen": type(ALMACEN).__name__ if ALMACEN else None, "modelos": motor.modelos_disponibles(),
-            "cpus": CPUS, "hilos_analisis": HILOS, "opencv": cv2.__version__, "version": app.version}
+            "cpus": CPUS, "hilos_analisis": HILOS, "opencv": cv2.__version__, "version": app.version,
+            "florence": os.getenv("LECTOR_FLORENCE", "1") != "0",
+            "huellas_guardadas": len(ALMACEN.listar(PREF_ANALISIS)) if ALMACEN else None}
 
 
 @app.get("/logo.png")

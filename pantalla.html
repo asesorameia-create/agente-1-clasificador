@@ -88,6 +88,21 @@
   .tira img { width: 100%; aspect-ratio: 3/4; object-fit: cover; border-radius: 8px; background: #1a0d09; }
   .general { margin-top: 12px; background: #1a0d09; border: 1px dashed var(--borde); border-radius: 12px; padding: 12px 14px;
     display: flex; justify-content: space-between; align-items: center; font-size: 14px; }
+  .rapido { background: #1a0d09; border: 2px solid var(--cobre); border-radius: 16px; padding: 14px; margin: 12px 0 16px; }
+  .rapido h3 { font-size: 17px; color: var(--cobre2); margin-bottom: 4px; }
+  .rapido .exp { font-size: 13px; color: var(--suave); margin-bottom: 12px; }
+  .rapido .caras { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 10px; }
+  .rapido .cara { background: #0e0604; border: 1px solid var(--borde); border-radius: 12px; padding: 6px; text-align: center; transition: border-color .2s; }
+  .rapido .cara img { width: 100%; aspect-ratio: 1/1; object-fit: cover; border-radius: 9px; cursor: zoom-in; display: block; }
+  .rapido .cara input { width: 100%; margin-top: 6px; background: #000; color: #fff; border: 2px solid var(--cobre); border-radius: 9px;
+    font-size: 22px; font-weight: 800; text-align: center; padding: 6px 2px; }
+  .rapido .cara input::placeholder { color: #7c5a48; font-weight: 600; font-size: 15px; }
+  .rapido .cara.ok { border-color: var(--verde); }
+  .rapido .cara.ok input { border-color: var(--verde); color: var(--verde); }
+  .rapido .cara .x { margin-top: 5px; font-size: 11px; color: var(--suave); background: none; border: none; cursor: pointer; text-decoration: underline; }
+  .rapido .fin { margin-top: 12px; }
+  .lupa { position: fixed; inset: 0; background: rgba(0,0,0,.88); display: none; align-items: center; justify-content: center; z-index: 50; padding: 16px; }
+  .lupa img { max-width: 100%; max-height: 90vh; border-radius: 12px; }
   .aviso { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); background: #052e1f; border: 1px solid var(--verde);
     color: #d1fae5; padding: 12px 18px; border-radius: 12px; font-size: 14px; z-index: 10; display: none; max-width: 90vw; }
   .vault-card { background: #140805; border: 1px solid var(--borde); border-radius: 14px; padding: 18px; margin-top: 18px; text-align: center; }
@@ -163,6 +178,7 @@
     <div class="ayuda">Cada ficha es un jugador con todas sus fotos. Toca la cara para ver sus fotos.
       Si algo no cuadra, toca <b>✏️ Corregir</b>: escribe el número, nombre o equipo.
       <b>Si dos fichas son el mismo jugador, ponles el mismo número y equipo y se unen solas.</b></div>
+    <div class="rapido" id="rapido" style="display:none"></div>
     <div class="dudas" id="dudas" style="display:none"></div>
     <div class="grid" id="fichas"></div>
     <div class="general" id="general" style="display:none"></div>
@@ -185,6 +201,7 @@
   </div>
 </div>
 <div class="aviso" id="aviso"></div>
+<div class="lupa" id="lupa" onclick="this.style.display='none'"><img id="lupaImg" alt="foto completa"></div>
 
 <script>
 const $ = (id) => document.getElementById(id);
@@ -329,6 +346,7 @@ async function cargarResultados(estado) {
     return String(da.equipo || "").localeCompare(String(db.equipo || "")) || (+(da.dorsal || 999) - +(db.dorsal || 999)) || a.localeCompare(b);
   });
   $("fichas").innerHTML = nombres.map((n, i) => ficha(n, folders[n], det[n] || {}, i)).join("");
+  pintarRapido(nombres, folders, det);
   const g = folders["00_Fotos_Generales_Equipo"];
   $("general").style.display = g ? "flex" : "none";
   if (g) $("general").innerHTML = `<span>📁 Fotos generales (grupo, público, sin protagonista claro)</span><b>${g.length}</b>`;
@@ -372,6 +390,71 @@ function ficha(nombre, fotos, info, i) {
     </div>
   </div>
   <div class="tira" id="tira${i}"><h4>${titulo} · ${esc(p.equipo)}</h4><div class="fotos"></div></div>`;
+}
+
+// ---------- "Ponle número a cada cara": todas las caras sin número juntas; escribe y pasa a la siguiente
+let colaGuardado = Promise.resolve(), pendientesRapido = 0;
+function pintarRapido(nombres, folders, det) {
+  const sinNum = nombres.filter(n => !partes(n, det[n] || {}).dorsal && !(det[n] || {}).nombre);
+  const caja = $("rapido");
+  if (!sinNum.length) { caja.style.display = "none"; return; }
+  caja.style.display = "block";
+  caja.innerHTML = `<h3>⚡ Ponle número a ${sinNum.length === 1 ? "esta cara" : `estas ${sinNum.length} caras`}</h3>
+    <div class="exp">Escribe el número y pulsa Enter. Se guarda solo. Si no lo sabes, déjalo vacío. Toca la cara para ver la foto completa.</div>
+    <div class="caras">${sinNum.map((n, k) => {
+      const info = det[n] || {}, sug = info.sugerido ? String(info.sugerido) : "";
+      const primera = (folders[n] || [])[0] || "";
+      return `<div class="cara" data-carpeta="${esc(n)}" data-foto="${esc(primera)}">
+        <img loading="lazy" alt="cara" src="/api/miniatura/${encodeURIComponent(n)}" onclick="lupa(this)">
+        <input inputmode="numeric" pattern="[0-9]*" maxlength="2" placeholder="${sug ? "¿" + esc(sug) + "?" : "N°"}" data-k="${k}"
+          onkeydown="if(event.key==='Enter'){event.preventDefault();this.blur();}" onchange="numeroRapido(this)">
+        <button class="x" onclick="noJugador(this)">no es jugador</button></div>`;
+    }).join("")}</div>
+    <button class="btn-action fin" onclick="terminarRapido()">✅ Listo, actualizar carpetas</button>`;
+}
+function lupa(img) {
+  const cara = img.closest(".cara"), carpeta = cara.dataset.carpeta, foto = cara.dataset.foto;
+  if (!foto) return;
+  $("lupaImg").src = `/api/vista/${encodeURIComponent(carpeta)}/${encodeURIComponent(foto)}`;
+  $("lupa").style.display = "flex";
+}
+function siguienteCara(input) {
+  const todos = [...document.querySelectorAll("#rapido .cara input")];
+  const sig = todos.slice(todos.indexOf(input) + 1).find(x => !x.closest(".cara").classList.contains("ok"));
+  if (sig) sig.focus();
+}
+function numeroRapido(input) {
+  const v = input.value.replace(/\D/g, "").slice(0, 2), cara = input.closest(".cara");
+  input.value = v;
+  if (!v || +v === 0) return;
+  const carpeta = cara.dataset.carpeta, info = (datosCarpetas.detalle || {})[carpeta] || {};
+  const equipo = partes(carpeta, info).equipo || "";
+  cara.classList.remove("ok");
+  pendientesRapido++;
+  siguienteCara(input);
+  colaGuardado = colaGuardado.then(async () => {   // de una en una: nunca dos cambios a la vez
+    try {
+      const r = await fetch("/api/corregir", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ carpeta, dorsal: v, equipo, nombre: "" }) });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "error");
+      cara.dataset.carpeta = d.carpeta;
+      cara.classList.add("ok");
+      if (d.unida) aviso(`🔗 #${v}: era el mismo jugador de otra carpeta, se unieron`);
+    } catch (e) { aviso("⚠️ No se pudo guardar el #" + v); }
+    finally { pendientesRapido--; }
+  });
+}
+async function noJugador(btn) {
+  const cara = btn.closest(".cara");
+  colaGuardado = colaGuardado.then(() => fetch("/api/a-generales", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ carpeta: cara.dataset.carpeta }) }));
+  cara.style.display = "none";
+}
+async function terminarRapido() {
+  await colaGuardado;
+  aviso("✅ Carpetas actualizadas");
+  cargarResultados();
 }
 
 // ---------- bandeja "Por confirmar": lo dudoso nunca entra solo a una carpeta
