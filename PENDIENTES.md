@@ -30,6 +30,14 @@ Pídele a Claude: "Lee PENDIENTES.md del agente1-clasificador y continúa desde 
 - PRIMER PASO de la próxima sesión: vuelta 4 como el fotógrafo + ZIP + auditoría. Revisar que DSC_3079 aparezca en las
   carpetas de todos sus jugadores visibles, que no haya mezclas nuevas y que el tiempo siga en <= 15 min.
 
+## REGLA DE NEGOCIO (usuario, 21 nov 2026): CUALQUIER jugador puede ser el comprador
+- El fotógrafo no sabe quién le va a comprar: el #4 de espaldas de DSC_3079 vale tanto como el #13.
+- Todo jugador visible, nítido, con uniforme de un equipo y que aparezca jugando junto a su equipo recibe carpeta
+  AUNQUE no tenga cara ni número confirmado (miniatura = su cuerpo de espaldas). Con número confirmado: Dorsal_XX.
+- Hoy (84e4560) queda fuera si no tiene cara y su número de una cifra no tiene 2 votos -> IMPLEMENTAR en identidad.py
+  (sección 4: aceptar 'suelto' sin cara si altura >= 0.30, nitidez del torso ok, y comparte foto con su equipo).
+- Mantener: nunca mezclar; ante la duda, una carpeta de más antes que perder a alguien. Agregar el caso a pruebas/.
+
 ## Siguiente paso
 1. Terminar vuelta 3: prueba como el fotógrafo (pantalla celular), ZIP en Descargas\Proyectop Fotografia   PRUEBA_ZIP_AGENTE_borrar_despues, auditoría con scratchpad/auditar_zip.py (hojas en scratchpad/out/auditoria).
 2. SigLIP2 para separar equipos (Equipo_A sigue mezclando 5 equipos) + huella de cuerpo de espaldas.
