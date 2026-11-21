@@ -14,7 +14,14 @@ Pídele a Claude: "Lee PENDIENTES.md del agente1-clasificador y continúa desde 
 - Vuelta 1 (antes de causa raíz): 3 mezclas de 12 carpetas multi-foto (5 por logo R5/15, 6 de 3 equipos, 10 de 2).
 - Vuelta 2 (c157a76): 0 mezclas en 50 carpetas, 0 números inventados. Fallos restantes: misma persona en 2
   carpetas desde la misma foto, brazo tatuado como cara, 3 caras borrosas -> corregidos en ca9c7f6 (sin verificar en vivo).
-- Vuelta 3 (ca9c7f6): EN CURSO al cerrar.
+- Vuelta 3 (ca9c7f6): 61 fotos, 10,3 min, 0 reinicios, 44 jugadores (16 con número), 23 generales.
+  Auditoría de las 20 carpetas con riesgo: 0 mezclas, 0 números falsos. Borrosas: eliminadas (mín. 53,6).
+  Tatuaje: eliminado. FALLA AÚN: el #10 rojo (IMG_4861) sale en Equipo_B/Dorsal_10 Y en Otros_jugadores/Jugador_02:
+  el detector da 2 recuadros que se SOLAPAN EN PARTE (uno con número sin cara, otro con cara), no uno dentro del
+  otro, así que _sin_duplicados (>=85 % contenido) no lo atrapa.
+  ARREGLO PROPUESTO (probar con pruebas/ antes de publicar): en identidad.py, dentro de UNA foto, si una instancia
+  tiene número y no cara, otra tiene cara y no número, y sus cajas se solapan (IoU > 0.3 o la menor está >60 % dentro),
+  tratarlas como la misma persona (hoy el candado 'misma foto = personas distintas' lo impide). Agregar el caso a pruebas/.
 
 ## Siguiente paso
 1. Terminar vuelta 3: prueba como el fotógrafo (pantalla celular), ZIP en Descargas\Proyectop Fotografia   PRUEBA_ZIP_AGENTE_borrar_despues, auditoría con scratchpad/auditar_zip.py (hojas en scratchpad/out/auditoria).
