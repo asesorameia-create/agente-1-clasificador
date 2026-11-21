@@ -120,3 +120,10 @@ Pasos siguientes, en orden:
 - Reducir carpetas partidas dentro del partido: camiseta + medias/zapatos + peinado + ráfaga por hora EXIF
   + número leído por SmolVLM propagado a todas las fotos del mismo jugador.
 - "Búscate" (selfie o número) va después, como canal de venta.
+- REGLA NUEVA (exigida por el usuario: NUNCA Dorsal_08 y Dorsal_08_2 del mismo jugador):
+  mismo número dentro del partido = misma carpeta, SALVO prueba de equipo distinto (nombre de equipo
+  leído distinto, color de la cifra/firma_numero distinto, camiseta claramente distinta). Si se separa,
+  el nombre lo dice (Dorsal_08_La_Guaira / Dorsal_08_Carabobo), jamás "_2".
+  Caso trampa real: #8 La Guaira y #8 Carabobo, ambos de blanco (fotos del cliente).
+- Personas de 1 sola foto sin número -> UNA carpeta "Otros_jugadores" con índice de caras (meta: 10-15
+  carpetas por partido, no 40). Código: identidad.py sección 1 (unión por dorsal) y sección 6 (nombres).
