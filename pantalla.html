@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>CastilloEnfoca - Organizador por Jugador</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --fondo: #0b0504; --tarjeta: #150a07; --borde: #36170e; --cobre: #ea580c; --cobre2: #f97316;
+    --texto: #ffffff; --suave: #a89f91; --verde: #10b981;
+  }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background-color: var(--fondo);
+    background-image: radial-gradient(circle at 85% 15%, #2a0f08 0%, transparent 55%),
+      radial-gradient(circle at 10% 85%, #1e0a05 0%, transparent 50%),
+      radial-gradient(rgba(234, 88, 12, 0.14) 1.2px, transparent 1.2px);
+    background-size: 100% 100%, 100% 100%, 28px 28px; background-attachment: fixed;
+    color: var(--texto); padding: 16px; min-height: 100vh;
+  }
+  .watermark-01 { position: fixed; top: 5px; right: 25px; font-size: 140px; font-weight: 900; color: transparent;
+    -webkit-text-stroke: 1.5px rgba(234, 88, 12, 0.14); pointer-events: none; z-index: 0; letter-spacing: -6px; font-family: monospace; }
+  .container { max-width: 640px; margin: 0 auto; position: relative; z-index: 1; }
+  .header { text-align: center; margin-bottom: 20px; padding-top: 8px; }
+  .logo-img { width: 100px; height: 100px; border-radius: 50%; margin: 0 auto 10px; display: block;
+    box-shadow: 0 0 25px rgba(239, 68, 68, 0.45); border: 2px solid #ef4444; }
+  .header h1 { font-size: 26px; font-weight: 900; letter-spacing: 1px; }
+  .brand-red { color: var(--cobre2); }
+  .header p { color: var(--suave); font-size: 14px; margin-top: 2px; }
+  .card { background: var(--tarjeta); border-radius: 18px; padding: 20px; margin-bottom: 16px; border: 1px solid var(--borde);
+    box-shadow: 0 10px 32px rgba(0,0,0,0.65), inset 0 1px 0 rgba(234, 88, 12, 0.12); }
+  .paso { font-size: 12px; font-weight: 800; color: var(--cobre2); letter-spacing: 1px; text-transform: uppercase; margin-bottom: 10px; }
+  .upload-box { border: 2px dashed var(--cobre); border-radius: 14px; padding: 30px 18px; text-align: center; cursor: pointer;
+    background: #1c0e09; transition: 0.2s; }
+  .upload-box.arrastrando { background: #2a140d; border-color: var(--cobre2); }
+  .upload-icon { font-size: 44px; margin-bottom: 6px; }
+  .upload-text { font-size: 17px; font-weight: bold; }
+  .upload-hint { font-size: 13px; color: var(--suave); margin-top: 4px; }
+  input[type="file"] { display: none; }
+  details.nomina { margin-top: 14px; background: #1a0d09; border: 1px solid var(--borde); border-radius: 12px; padding: 12px 14px; }
+  details.nomina summary { cursor: pointer; font-size: 14px; color: #fdba74; font-weight: 700; }
+  details.nomina p { font-size: 12px; color: var(--suave); margin: 8px 0; line-height: 1.4; }
+  textarea { width: 100%; min-height: 90px; background: #0e0604; color: #fff; border: 1px solid var(--borde); border-radius: 10px;
+    padding: 10px; font-size: 14px; font-family: inherit; }
+  .btn-action { width: 100%; background: linear-gradient(135deg, #ea580c 0%, #c2410c 100%); color: white; border: none; padding: 18px;
+    border-radius: 14px; font-size: 18px; font-weight: 900; cursor: pointer; margin-top: 16px; display: none;
+    box-shadow: 0 4px 20px rgba(234, 88, 12, 0.45); text-transform: uppercase; }
+  .btn-action:disabled { background: #2d1810; box-shadow: none; color: #786558; }
+  .btn-download { width: 100%; background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: white; border: none; padding: 18px;
+    border-radius: 14px; font-size: 18px; font-weight: 900; cursor: pointer; margin-top: 14px; text-align: center; text-decoration: none;
+    display: block; box-shadow: 0 4px 20px rgba(16, 185, 129, 0.45); text-transform: uppercase; }
+  .btn-clean { width: 100%; background: transparent; color: var(--suave); border: 1px solid var(--borde); padding: 12px; border-radius: 12px;
+    font-size: 13px; cursor: pointer; margin-top: 12px; }
+  .btn-clean:hover { color: var(--cobre2); border-color: var(--cobre); }
+  .barra { height: 14px; background: #0e0604; border-radius: 10px; overflow: hidden; border: 1px solid var(--borde); margin: 12px 0 8px; }
+  .barra > div { height: 100%; width: 0%; background: linear-gradient(90deg, #ea580c, #f59e0b); transition: width 0.4s; }
+  .estado-titulo { font-size: 16px; font-weight: 800; }
+  .estado-detalle { font-size: 13px; color: var(--suave); font-family: monospace; }
+  .resumen { font-size: 15px; line-height: 1.5; margin-bottom: 4px; }
+  .resumen b { color: var(--cobre2); }
+  .ayuda { font-size: 12px; color: var(--suave); margin-bottom: 14px; line-height: 1.45; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(165px, 1fr)); gap: 12px; }
+  .ficha { background: #1a0d09; border: 1px solid var(--borde); border-radius: 14px; overflow: hidden; display: flex; flex-direction: column; }
+  .ficha.revisada { border-color: #065f46; }
+  .ficha .foto { aspect-ratio: 1 / 1; background: #0e0604 center/cover no-repeat; position: relative; cursor: pointer; }
+  .ficha .foto .num { position: absolute; left: 8px; bottom: 8px; background: rgba(0,0,0,0.72); border: 1px solid var(--cobre);
+    color: #fff; font-weight: 900; font-size: 20px; padding: 2px 10px; border-radius: 10px; }
+  .ficha .foto .cuantas { position: absolute; right: 8px; top: 8px; background: linear-gradient(135deg, #ea580c, #c2410c);
+    font-size: 12px; font-weight: 800; padding: 3px 9px; border-radius: 20px; }
+  .ficha .info { padding: 10px 12px 12px; }
+  .ficha .titulo { font-weight: 800; font-size: 14px; word-break: break-word; }
+  .ficha .sub { font-size: 12px; color: var(--suave); margin-top: 2px; word-break: break-word; }
+  .ficha .botones { display: flex; gap: 6px; margin-top: 10px; }
+  .ficha button { flex: 1; background: #240f08; color: #fdba74; border: 1px solid #7c2d12; border-radius: 9px; padding: 8px 4px;
+    font-size: 12px; font-weight: 700; cursor: pointer; }
+  .ficha form { display: none; margin-top: 10px; gap: 6px; flex-direction: column; }
+  .ficha form.abierto { display: flex; }
+  .ficha input { width: 100%; background: #0e0604; color: #fff; border: 1px solid var(--borde); border-radius: 8px; padding: 8px; font-size: 14px; }
+  .ficha form .fila { display: flex; gap: 6px; }
+  .ficha form .guardar { background: linear-gradient(135deg, #10b981, #059669); color: #fff; border: none; }
+  .ficha form .quitar { background: transparent; color: var(--suave); border: 1px dashed var(--borde); }
+  .tira { display: none; grid-column: 1 / -1; background: #0e0604; border: 1px solid var(--borde); border-radius: 14px; padding: 10px; }
+  .tira.abierta { display: block; }
+  .tira h4 { font-size: 13px; color: #fdba74; margin-bottom: 8px; }
+  .tira .fotos { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 6px; }
+  .tira img { width: 100%; aspect-ratio: 3/4; object-fit: cover; border-radius: 8px; background: #1a0d09; }
+  .general { margin-top: 12px; background: #1a0d09; border: 1px dashed var(--borde); border-radius: 12px; padding: 12px 14px;
+    display: flex; justify-content: space-between; align-items: center; font-size: 14px; }
+  .aviso { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); background: #052e1f; border: 1px solid var(--verde);
+    color: #d1fae5; padding: 12px 18px; border-radius: 12px; font-size: 14px; z-index: 10; display: none; max-width: 90vw; }
+  .vault-card { background: #140805; border: 1px solid var(--borde); border-radius: 14px; padding: 18px; margin-top: 18px; text-align: center; }
+  .vault-title { font-size: 15px; font-weight: bold; color: #fb923c; margin-bottom: 6px; }
+  .vault-desc { font-size: 13px; color: var(--suave); margin-bottom: 12px; line-height: 1.4; }
+  .btn-vault { background: #240f08; color: #fb923c; border: 1px solid #7c2d12; padding: 12px 18px; border-radius: 10px; font-size: 14px;
+    font-weight: bold; text-decoration: none; display: inline-block; cursor: pointer; }
+  .dudas { background: #1f1206; border: 1px solid #b45309; border-radius: 16px; padding: 14px; margin-bottom: 16px; }
+  .dudas h3 { font-size: 15px; color: #fbbf24; margin-bottom: 4px; }
+  .dudas .exp { font-size: 12px; color: var(--suave); margin-bottom: 12px; line-height: 1.4; }
+  .duda { background: #140a05; border: 1px solid var(--borde); border-radius: 14px; padding: 12px; margin-bottom: 10px; }
+  .duda .par { display: grid; grid-template-columns: 1fr auto 1fr; gap: 8px; align-items: center; }
+  .duda .par img, .duda .par .numgrande { width: 100%; aspect-ratio: 1/1; object-fit: cover; border-radius: 12px; background: #0e0604; border: 1px solid var(--borde); }
+  .duda .numgrande { display: flex; align-items: center; justify-content: center; font-size: 44px; font-weight: 900; color: #fdba74; }
+  .duda .vs { font-size: 22px; color: #fbbf24; font-weight: 900; }
+  .duda .etq { font-size: 11px; color: var(--suave); text-align: center; margin-top: 4px; }
+  .duda .preg { font-size: 15px; font-weight: 800; margin: 10px 0 2px; text-align: center; }
+  .duda .mot { font-size: 12px; color: var(--suave); text-align: center; }
+  .duda .acciones { display: flex; gap: 8px; margin-top: 10px; }
+  .duda .acciones button { flex: 1; padding: 14px; border-radius: 12px; font-size: 16px; font-weight: 900; cursor: pointer; border: none; }
+  .duda .si { background: linear-gradient(135deg, #10b981, #059669); color: #fff; }
+  .duda .no { background: #2a1410; color: #fca5a5; border: 1px solid #7f1d1d !important; }
+  .duda .verfoto { display: block; text-align: center; font-size: 12px; color: #fdba74; margin-top: 8px; cursor: pointer; text-decoration: underline; }
+  .duda .completa { display: none; width: 100%; border-radius: 10px; margin-top: 8px; }
+  @media (max-width: 420px) { .grid { grid-template-columns: 1fr 1fr; gap: 8px; } .ficha .titulo { font-size: 13px; } }
+</style>
+</head>
+<body>
+<div class="watermark-01">01</div>
+<div class="container">
+  <div class="header">
+    <img src="/logo.png" alt="CastilloEnfoca" class="logo-img" onerror="this.style.display='none'">
+    <h1><span>CASTILLO</span><span class="brand-red">ENFOCA</span></h1>
+    <p>Organizador biométrico: una carpeta por jugador</p>
+  </div>
+
+  <!-- PASO 1 -->
+  <div class="card" id="cardSubir">
+    <div class="paso">Paso 1 · Elige las fotos del partido</div>
+    <div class="upload-box" id="zona" onclick="document.getElementById('fileInput').click()">
+      <div class="upload-icon">📸</div>
+      <div class="upload-text" id="uploadLabel">Toca aquí o arrastra las fotos</div>
+      <div class="upload-hint">Selecciona todas juntas, en el orden que sea (JPG o PNG)</div>
+    </div>
+    <input type="file" id="fileInput" multiple accept="image/jpeg,image/png,image/webp">
+    <details class="nomina">
+      <summary>📝 ¿Tienes la lista de jugadores? (opcional)</summary>
+      <p>Una línea por jugador: número y nombre. Si hay dos equipos con el mismo número, pon el equipo delante.<br>
+         Ejemplo: <i>8 Juan Pérez</i> · <i>Trujillo 6 Luis Rojas</i></p>
+      <textarea id="nomina" placeholder="8 Juan Pérez&#10;Trujillo 6 Luis Rojas"></textarea>
+    </details>
+    <button id="btnSubir" class="btn-action">🚀 Organizar fotos</button>
+  </div>
+
+  <!-- PROGRESO -->
+  <div class="card" id="cardEstado" style="display:none">
+    <div class="paso">Paso 2 · El agente está trabajando</div>
+    <div class="estado-titulo" id="estadoTitulo">Preparando...</div>
+    <div class="barra"><div id="barra"></div></div>
+    <div class="estado-detalle" id="estadoDetalle"></div>
+  </div>
+
+  <!-- RESULTADOS -->
+  <div class="card" id="cardCarpetas" style="display:none">
+    <div class="paso">Paso 3 · Revisa y descarga</div>
+    <div class="resumen" id="resumen"></div>
+    <div class="ayuda">Cada ficha es un jugador con todas sus fotos. Toca la cara para ver sus fotos.
+      Si algo no cuadra, toca <b>✏️ Corregir</b>: escribe el número, nombre o equipo.
+      <b>Si dos fichas son el mismo jugador, ponles el mismo número y equipo y se unen solas.</b></div>
+    <div class="dudas" id="dudas" style="display:none"></div>
+    <div class="grid" id="fichas"></div>
+    <div class="general" id="general" style="display:none"></div>
+    <a href="/api/descargar-zip" id="btnDescargar" class="btn-download">📦 Descargar todas las carpetas (ZIP)</a>
+    <button class="btn-clean" onclick="limpiarTodo()">🧹 Empezar otro partido</button>
+  </div>
+
+  <div class="vault-card" id="cardBoveda" style="display:none">
+    <div class="vault-title">🛡️ Bóveda de Respaldo en la Nube</div>
+    <p class="vault-desc" id="vaultDesc">¿Borraste una foto por error? Tu copia de seguridad está a salvo en la nube.</p>
+    <div style="display:flex; gap:10px; justify-content:center; flex-wrap:wrap;">
+      <a href="/api/descargar-boveda-zip" class="btn-vault">📦 Restaurar todo en ZIP</a>
+      <button class="btn-vault" style="background:#27272a; color:#fff; border-color:#52525b" onclick="abrirRescate()">🔍 Rescatar foto suelta</button>
+    </div>
+    <div id="modalRescate" style="display:none; margin-top:16px; background:#18181b; border:1px solid #3f3f46; border-radius:12px; padding:14px; text-align:left">
+      <h4 style="font-size:13px; color:#facc15; margin-bottom:8px">Elige la foto que perdiste:</h4>
+      <div id="listaRescate" style="max-height:220px; overflow-y:auto"></div>
+      <button class="btn-clean" onclick="document.getElementById('modalRescate').style.display='none'">Cerrar</button>
+    </div>
+  </div>
+</div>
+<div class="aviso" id="aviso"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const LOTE_ARCHIVOS = 6, LOTE_BYTES = 24 * 1024 * 1024;
+let seleccion = [];
+let sondeo = null;
+
+function aviso(txt, ms = 3500) { const a = $("aviso"); a.textContent = txt; a.style.display = "block"; clearTimeout(a._t); a._t = setTimeout(() => a.style.display = "none", ms); }
+function mb(b) { return (b / 1048576).toFixed(b > 1e9 ? 0 : 1) + " MB"; }
+function tiempo(s) { if (s == null) return ""; s = Math.max(0, Math.round(s)); const m = Math.floor(s / 60); return m ? `${m} min ${s % 60} s` : `${s} s`; }
+
+// ---------- seleccion de fotos (clic o arrastrar)
+function elegir(files) {
+  seleccion = Array.from(files).filter(f => /\.(jpe?g|png|webp)$/i.test(f.name) || /^image\/(jpeg|png|webp)$/.test(f.type));
+  const btn = $("btnSubir");
+  if (!seleccion.length) { $("uploadLabel").textContent = "No encontré fotos JPG/PNG en lo que elegiste"; btn.style.display = "none"; return; }
+  const total = seleccion.reduce((s, f) => s + f.size, 0);
+  $("uploadLabel").textContent = `✅ ${seleccion.length} fotos (${mb(total)})`;
+  btn.style.display = "block"; btn.disabled = false;
+  btn.textContent = `🚀 Organizar ${seleccion.length} fotos`;
+}
+$("fileInput").addEventListener("change", e => elegir(e.target.files));
+const zona = $("zona");
+["dragenter", "dragover"].forEach(ev => zona.addEventListener(ev, e => { e.preventDefault(); zona.classList.add("arrastrando"); }));
+["dragleave", "drop"].forEach(ev => zona.addEventListener(ev, e => { e.preventDefault(); zona.classList.remove("arrastrando"); }));
+zona.addEventListener("drop", e => elegir(e.dataTransfer.files));
+
+// ---------- subida por tandas (el servidor analiza mientras llegan)
+function subirLote(lote, primero) {
+  return new Promise((ok, mal) => {
+    const fd = new FormData();
+    lote.forEach(f => fd.append("files", f, f.name));
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `/api/subir-y-procesar?limpiar=${primero ? 1 : 0}&procesar=0`);
+    xhr.upload.onprogress = e => { if (e.lengthComputable) subirLote.parcial = e.loaded; };
+    xhr.onload = () => (xhr.status >= 200 && xhr.status < 300) ? ok(JSON.parse(xhr.responseText)) : mal(new Error(xhr.responseText || xhr.status));
+    xhr.onerror = () => mal(new Error("Sin conexión"));
+    xhr.send(fd);
+  });
+}
+
+async function organizar() {
+  if (!seleccion.length) return;
+  const btn = $("btnSubir"); btn.disabled = true; btn.textContent = "⏳ Trabajando...";
+  $("cardCarpetas").style.display = "none"; $("cardEstado").style.display = "block";
+  const total = seleccion.reduce((s, f) => s + f.size, 0);
+  const lotes = []; let actual = [], peso = 0;
+  for (const f of seleccion) {
+    if (actual.length && (actual.length >= LOTE_ARCHIVOS || peso + f.size > LOTE_BYTES)) { lotes.push(actual); actual = []; peso = 0; }
+    actual.push(f); peso += f.size;
+  }
+  if (actual.length) lotes.push(actual);
+  let enviados = 0, fotosEnviadas = 0; const t0 = Date.now();
+  sondear(true);
+  for (let i = 0; i < lotes.length; i++) {
+    subirLote.parcial = 0;
+    const tic = setInterval(() => {
+      const hecho = enviados + (subirLote.parcial || 0);
+      const vel = hecho / Math.max(1, (Date.now() - t0) / 1000);
+      $("estadoTitulo").textContent = `Subiendo y analizando: ${fotosEnviadas} de ${seleccion.length} fotos`;
+      $("barra").style.width = (100 * hecho / total * 0.85).toFixed(1) + "%";
+      $("estadoDetalle").textContent = `${mb(hecho)} de ${mb(total)} · faltan ~${tiempo((total - hecho) / Math.max(vel, 1))} de subida`;
+    }, 400);
+    let intentos = 0;
+    while (true) {
+      try { await subirLote(lotes[i], i === 0); break; }
+      catch (e) {
+        if (++intentos >= 4) { clearInterval(tic); $("estadoTitulo").textContent = "❌ Se cortó la subida. Revisa tu internet y vuelve a intentar."; btn.disabled = false; btn.textContent = "🔁 Reintentar"; return; }
+        $("estadoDetalle").textContent = `Conexión inestable, reintentando (${intentos}/3)...`;
+        await new Promise(r => setTimeout(r, 2500 * intentos));
+      }
+    }
+    clearInterval(tic);
+    enviados += lotes[i].reduce((s, f) => s + f.size, 0); fotosEnviadas += lotes[i].length;
+  }
+  const fd = new FormData(); fd.append("nomina", $("nomina").value || "");
+  await fetch("/api/procesar", { method: "POST", body: fd });
+  $("cardSubir").style.display = "none";
+  seleccion = [];
+}
+$("btnSubir").addEventListener("click", organizar);
+
+// ---------- progreso del servidor
+function sondear(activar) {
+  if (activar && !sondeo) sondeo = setInterval(leerEstado, 1500);
+  if (!activar && sondeo) { clearInterval(sondeo); sondeo = null; }
+}
+async function leerEstado() {
+  try {
+    const d = await (await fetch("/api/estado")).json();
+    const subiendo = $("btnSubir").disabled && $("cardSubir").style.display !== "none";
+    if (d.fase === "analizando") {
+      $("cardEstado").style.display = "block";
+      const p = d.total_photos ? d.processed_photos / d.total_photos : 0;
+      $("estadoTitulo").textContent = `🔍 Reconociendo rostros y dorsales: ${d.processed_photos} de ${d.total_photos} fotos`;
+      $("barra").style.width = (85 + 12 * p).toFixed(1) + "%";
+      $("estadoDetalle").textContent = d.eta_seg ? `Falta aprox. ${tiempo(d.eta_seg)}` : "";
+    } else if (d.fase === "carpetas") {
+      $("estadoTitulo").textContent = "📂 Creando una carpeta por jugador...";
+      $("barra").style.width = "98%";
+      $("estadoDetalle").textContent = d.total_photos ? `${d.processed_photos}/${d.total_photos} copias` : "";
+    } else if (d.fase === "listo" && !subiendo) {
+      sondear(false);
+      $("barra").style.width = "100%";
+      $("cardEstado").style.display = "none";
+      cargarResultados(d);
+    } else if (d.fase === "error") {
+      sondear(false);
+      $("estadoTitulo").textContent = "❌ " + (d.current_action || "Ocurrió un error");
+      $("btnSubir").disabled = false; $("btnSubir").textContent = "🔁 Reintentar";
+    }
+  } catch (e) {}
+}
+
+// ---------- resultados: una ficha por jugador
+let datosCarpetas = {};
+async function cargarResultados(estado) {
+  const d = await (await fetch("/api/carpetas")).json();
+  datosCarpetas = d;
+  const folders = d.folders || {}, det = d.detalle || {};
+  const nombres = Object.keys(folders).filter(n => n !== "00_Fotos_Generales_Equipo");
+  if (!nombres.length && !folders["00_Fotos_Generales_Equipo"] && !(d.dudas || []).length) { $("cardCarpetas").style.display = "none"; return; }
+  const r = d.resumen || (estado && estado.resumen) || {};
+  const dur = estado && estado.duracion_seg ? ` en <b>${tiempo(estado.duracion_seg)}</b>` : "";
+  const dudas = d.dudas || [];
+  $("resumen").innerHTML = `✅ <b>${nombres.length}</b> jugadores identificados en <b>${r.fotos ?? "?"}</b> fotos${dur}.` +
+    (dudas.length ? `<br>🔎 <b>${dudas.length}</b> ${dudas.length === 1 ? "foto necesita" : "fotos necesitan"} tu confirmación (un toque cada una).` : "<br>🎯 Nada pendiente: todo quedó con prueba suficiente.");
+  pintarDudas(dudas, folders);
+  nombres.sort((a, b) => {
+    const da = det[a] || {}, db = det[b] || {};
+    return String(da.equipo || "").localeCompare(String(db.equipo || "")) || (+(da.dorsal || 999) - +(db.dorsal || 999)) || a.localeCompare(b);
+  });
+  $("fichas").innerHTML = nombres.map((n, i) => ficha(n, folders[n], det[n] || {}, i)).join("");
+  const g = folders["00_Fotos_Generales_Equipo"];
+  $("general").style.display = g ? "flex" : "none";
+  if (g) $("general").innerHTML = `<span>📁 Fotos generales (grupo, público, sin protagonista claro)</span><b>${g.length}</b>`;
+  $("cardCarpetas").style.display = "block";
+  $("cardSubir").style.display = "none";   // hay un partido en pantalla: para otro, "Empezar otro partido"
+}
+
+function partes(nombre, info) {
+  const m = /^Dorsal_(\d+)_(.+)$/.exec(nombre);
+  let dorsal = info.dorsal || (m ? String(+m[1]) : "");
+  let equipo = info.equipo || "", nom = info.nombre || "";
+  if (!equipo) { const mm = /^(?:Dorsal_\d+|Jugador_\d+)_(.+)$/.exec(nombre); equipo = mm ? mm[1] : ""; }
+  return { dorsal, equipo: equipo.replace(/_/g, " "), nombre: String(nom).replace(/_/g, " ") };
+}
+
+function ficha(nombre, fotos, info, i) {
+  const p = partes(nombre, info);
+  const titulo = p.nombre ? esc(p.nombre) : (p.dorsal ? `Jugador #${esc(p.dorsal)}` : "Jugador sin número");
+  const mini = `/api/miniatura/${encodeURIComponent(nombre)}?t=${Date.now()}`;
+  return `
+  <div class="ficha ${info.revisada ? "revisada" : ""}" data-carpeta="${esc(nombre)}">
+    <div class="foto" style="background-image:url('${mini}')" onclick="verFotos(${i})">
+      ${p.dorsal ? `<div class="num">#${esc(p.dorsal)}</div>` : ""}
+      <div class="cuantas">${fotos.length} ${fotos.length === 1 ? "foto" : "fotos"}</div>
+    </div>
+    <div class="info">
+      <div class="titulo">${titulo}</div>
+      <div class="sub">${esc(p.equipo || "Equipo sin leer")}</div>
+      <div class="botones">
+        <button onclick="verFotos(${i})">👁️ Fotos</button>
+        <button onclick="abrirForm(${i})">✏️ Corregir</button>
+      </div>
+      <form id="form${i}" onsubmit="return guardar(event, ${i})">
+        <div class="fila"><input name="dorsal" inputmode="numeric" maxlength="2" placeholder="N°" value="${esc(p.dorsal)}" style="max-width:64px">
+          <input name="equipo" placeholder="Equipo" value="${esc(p.equipo)}"></div>
+        <input name="nombre" placeholder="Nombre (opcional)" value="${esc(p.nombre)}">
+        <button class="guardar" type="submit">✅ Guardar</button>
+        <button class="quitar" type="button" onclick="aGenerales(${i})">No es un jugador → Generales</button>
+      </form>
+    </div>
+  </div>
+  <div class="tira" id="tira${i}"><h4>${titulo} · ${esc(p.equipo)}</h4><div class="fotos"></div></div>`;
+}
+
+// ---------- bandeja "Por confirmar": lo dudoso nunca entra solo a una carpeta
+function pintarDudas(dudas, folders) {
+  const caja = $("dudas");
+  if (!dudas.length) { caja.style.display = "none"; caja.innerHTML = ""; return; }
+  caja.style.display = "block";
+  caja.innerHTML = `<h3>🔎 Por confirmar (${dudas.length})</h3>
+    <div class="exp">El agente no pone en una carpeta nada de lo que no esté seguro. Estas fotos tienen pistas, pero no prueba suficiente: confírmalas con un toque.</div>` +
+    dudas.map(dd => {
+      const equipo = esc(String(dd.equipo || "").replace(/_/g, " "));
+      const conRef = folders[dd.carpeta] || dd.foto_ref;
+      const izq = conRef ? `<img src="/api/miniatura/${encodeURIComponent(dd.carpeta)}" alt="jugador">`
+                         : `<div class="numgrande">#${esc(dd.dorsal || "?")}</div>`;
+      const pregunta = dd.foto_ref ? "¿Es la misma persona?"
+        : (dd.dorsal ? `¿Es el jugador #${esc(dd.dorsal)}${equipo ? " de " + equipo : ""}?` : `¿Es este mismo jugador${equipo ? " de " + equipo : ""}?`);
+      return `<div class="duda" id="duda-${esc(dd.id)}">
+        <div class="par">
+          <div>${izq}<div class="etq">${conRef ? "Jugador" : "Número leído"}</div></div>
+          <div class="vs">=?</div>
+          <div><img src="/api/miniatura-duda/${encodeURIComponent(dd.id)}" alt="en esta foto"><div class="etq">En esta foto</div></div>
+        </div>
+        <div class="preg">${pregunta}</div>
+        <div class="mot">${esc(dd.motivo)}</div>
+        <span class="verfoto" onclick="verCompleta('${esc(dd.id)}', '${encodeURIComponent(dd.foto)}')">Ver la foto completa</span>
+        <img class="completa" id="completa-${esc(dd.id)}" alt="foto completa">
+        <div class="acciones">
+          <button class="si" onclick="responder('${esc(dd.id)}', true)">✅ Sí</button>
+          <button class="no" onclick="responder('${esc(dd.id)}', false)">❌ No</button>
+        </div>
+      </div>`;
+    }).join("");
+}
+function verCompleta(id, foto) {
+  const im = $("completa-" + id);
+  if (!im.src) im.src = `/api/vista/_original/${foto}`;
+  im.style.display = im.style.display === "block" ? "none" : "block";
+}
+async function responder(id, si) {
+  const card = $("duda-" + id); if (card) card.style.opacity = 0.4;
+  const r = await fetch("/api/confirmar", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, si }) });
+  const d = await r.json();
+  if (!r.ok) { aviso("⚠️ " + (d.error || "No se pudo guardar")); if (card) card.style.opacity = 1; return; }
+  aviso(si ? "✅ Añadida a la carpeta del jugador" : "Descartada: no entra en esa carpeta", 2000);
+  cargarResultados();
+}
+
+function carpetaDe(i) { return document.querySelectorAll(".ficha")[i].dataset.carpeta; }
+function abrirForm(i) { $("form" + i).classList.toggle("abierto"); }
+function verFotos(i) {
+  const t = $("tira" + i), c = carpetaDe(i);
+  if (t.classList.toggle("abierta") && !t.dataset.cargada) {
+    const fotos = (datosCarpetas.folders || {})[c] || [];
+    t.querySelector(".fotos").innerHTML = fotos.map(f => `<img loading="lazy" alt="${esc(f)}" title="${esc(f)}" src="/api/vista/${encodeURIComponent(c)}/${encodeURIComponent(f)}">`).join("");
+    t.dataset.cargada = "1";
+  }
+}
+async function guardar(ev, i) {
+  ev.preventDefault();
+  const f = ev.target, body = { carpeta: carpetaDe(i), dorsal: f.dorsal.value.trim(), equipo: f.equipo.value.trim(), nombre: f.nombre.value.trim() };
+  if (!body.dorsal && !body.nombre) { aviso("Escribe al menos el número o el nombre"); return false; }
+  const r = await fetch("/api/corregir", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const d = await r.json();
+  if (!r.ok) { aviso("⚠️ " + (d.error || "No se pudo guardar")); return false; }
+  aviso(d.unida ? "🔗 Listo: las dos fichas eran el mismo jugador y se unieron" : "✅ Corregido");
+  cargarResultados();
+  return false;
+}
+async function aGenerales(i) {
+  if (!confirm("¿Mover estas fotos a Generales? (por ejemplo, si es público o árbitro)")) return;
+  await fetch("/api/a-generales", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ carpeta: carpetaDe(i) }) });
+  aviso("Movidas a Fotos generales"); cargarResultados();
+}
+
+async function limpiarTodo() {
+  if (!confirm("¿Empezar otro partido? Las carpetas de este partido se borrarán de la pantalla (la Bóveda de Respaldo se conserva). Descarga el ZIP antes si no lo has hecho.")) return;
+  const r = await fetch("/api/limpiar", { method: "POST" });
+  if (!r.ok) { aviso("Espera a que termine el proceso actual"); return; }
+  $("cardCarpetas").style.display = "none"; $("cardEstado").style.display = "none"; $("cardSubir").style.display = "block";
+  $("uploadLabel").textContent = "Toca aquí o arrastra las fotos"; $("btnSubir").style.display = "none"; $("fileInput").value = "";
+  refrescarBoveda();
+}
+
+$("btnDescargar").addEventListener("click", e => {
+  const n = (datosCarpetas.dudas || []).length;
+  if (n && !confirm(`Aún tienes ${n} ${n === 1 ? "foto" : "fotos"} por confirmar. Si descargas ahora, esas fotos no estarán en las carpetas de los jugadores. ¿Descargar igual?`)) e.preventDefault();
+});
+
+// ---------- boveda
+async function refrescarBoveda() {
+  try {
+    const d = await (await fetch("/api/boveda")).json();
+    if (d.count > 0) {
+      $("cardBoveda").style.display = "block";
+      $("vaultDesc").textContent = `¿Borraste una foto por error? Tienes ${d.count === 1 ? "1 foto protegida" : d.count + " fotos protegidas"} en la nube.`;
+    }
+  } catch (e) {}
+}
+async function abrirRescate() {
+  const m = $("modalRescate"), l = $("listaRescate"); m.style.display = "block"; l.textContent = "Cargando...";
+  const d = await (await fetch("/api/boveda")).json();
+  l.innerHTML = (d.backup_photos || []).map(f => `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px;border-bottom:1px solid #27272a;font-size:13px">
+     <span style="color:#e4e4e7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:65%">📷 ${esc(f)}</span>
+     <a href="/api/boveda/foto/${encodeURIComponent(f)}" download style="background:#ef4444;color:#fff;padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:12px">Descargar</a></div>`).join("") || "No hay fotos respaldadas aún.";
+}
+
+// ---------- al abrir la pagina: retomar donde quedo
+(async () => {
+  refrescarBoveda();
+  try {
+    const d = await (await fetch("/api/estado")).json();
+    if (d.is_processing || d.fase === "analizando" || d.fase === "carpetas") { $("cardEstado").style.display = "block"; $("cardSubir").style.display = "none"; sondear(true); }
+    else cargarResultados(d);
+  } catch (e) {}
+})();
+</script>
+</body>
+</html>

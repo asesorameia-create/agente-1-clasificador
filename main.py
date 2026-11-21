@@ -1,65 +1,104 @@
+"""
+CastilloEnfoca - Agente 1 Clasificador (v4).
+
+El fotografo sube las fotos desordenadas de un partido y el agente crea UNA carpeta por jugador:
+  - Huella biometrica facial (YuNet + SFace) + dorsal (PP-OCR DB + CRNN) + equipo (texto y color de camiseta).
+  - Nada esta escrito a mano para un partido concreto: dorsales 1-99, cualquier equipo, cualquier archivo.
+  - Las fotos se analizan MIENTRAS se suben; al terminar la subida solo falta crear las carpetas.
+  - Pantalla de revision: una ficha por jugador; corregir numero/nombre/equipo con un toque
+    (poner el mismo numero y equipo de otra ficha las une).
+"""
 import os
 import io
 import gc
 import re
+import json
+import time
+import queue
 import zipfile
 import logging
+import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor, Future
 from typing import List, Dict, Any, Optional
-from fastapi import FastAPI, BackgroundTasks, UploadFile, File, Response
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, FileResponse
-import boto3
-from botocore.config import Config
+
 import numpy as np
 import cv2
+from fastapi import FastAPI, BackgroundTasks, UploadFile, File, Form, Response, Request
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, FileResponse
+from fastapi.concurrency import run_in_threadpool
+from starlette.background import BackgroundTask
 
-try:
-    import pytesseract
-except ImportError:
-    pytesseract = None
+import motor_biometrico as motor
+import identidad
+from almacen import crear_almacen
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("CastilloEnfoca")
 
 app = FastAPI(
-    title="CastilloEnfoca - Organizador por Dorsal y Nombre",
-    description="Clasificación estricta por número de dorsal y nombre del jugador",
-    version="3.1.0"
+    title="CastilloEnfoca - Organizador biometrico por jugador",
+    description="Una carpeta unica por jugador: huella facial + dorsal + equipo",
+    version="4.0.0",
 )
 
-# Variables de entorno Cloudflare R2
-R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID", "")
-R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY", "")
-R2_ENDPOINT_URL = os.getenv("R2_ENDPOINT_URL", "")
-R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", "agente-1-clasificador-fotos")
+ALMACEN = crear_almacen()
+EXT_IMG = (".jpg", ".jpeg", ".png", ".webp")
+PREF_ORG, PREF_BOVEDA, PREF_MINI, PREF_SESION = "organizadas/", "boveda_respaldo/", "miniaturas/", "sesion/"
+GENERAL = identidad.GENERAL
 
-# Nómina de nombres conocidos del partido (si no tiene nombre impreso, se usa únicamente el dorsal)
-player_names = {
-    "1": "Trujillo"
-}
 
-# Dorsales válidos del partido (Portero #1 Trujillo y Jugador #13)
-valid_dorsals = {"1", "13"}
+# ------------------------------------------------------------------ hilos de analisis
+def _cpus_disponibles() -> int:
+    """CPUs reales del contenedor (Render limita por cgroup aunque os.cpu_count() muestre las del host)."""
+    try:
+        with open("/sys/fs/cgroup/cpu.max") as f:            # cgroup v2
+            q, p = f.read().split()
+            if q != "max":
+                return max(1, int(int(q) / int(p)))
+    except Exception:
+        pass
+    try:
+        with open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us") as fq, open("/sys/fs/cgroup/cpu/cpu.cfs_period_us") as fp:  # cgroup v1
+            q, p = int(fq.read()), int(fp.read())
+            if q > 0:
+                return max(1, int(q / p))
+    except Exception:
+        pass
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except Exception:
+        return max(1, os.cpu_count() or 1)
 
-def get_r2_client():
-    if not R2_ACCESS_KEY_ID or not R2_SECRET_ACCESS_KEY or not R2_ENDPOINT_URL:
-        return None
-    return boto3.client(
-        "s3",
-        endpoint_url=R2_ENDPOINT_URL,
-        aws_access_key_id=R2_ACCESS_KEY_ID,
-        aws_secret_access_key=R2_SECRET_ACCESS_KEY,
-        config=Config(signature_version="s3v4")
-    )
 
-processing_status = {
+CPUS = _cpus_disponibles()
+HILOS = max(1, min(int(os.getenv("ANALISIS_HILOS", "0")) or min(4, CPUS), 8))
+if HILOS > 1:
+    cv2.setNumThreads(max(1, CPUS // HILOS))
+EJECUTOR = ThreadPoolExecutor(max_workers=HILOS, thread_name_prefix="analisis")
+MAX_EN_MEMORIA = 3 * HILOS     # fotos esperando analisis con sus bytes en RAM (el resto se relee del almacen)
+logger.info("CPUs=%s hilos de analisis=%s almacen=%s", CPUS, HILOS, type(ALMACEN).__name__ if ALMACEN else None)
+
+_lock = threading.RLock()
+_tareas: Dict[str, Future] = {}           # key -> analisis en curso / listo
+_en_memoria = threading.Semaphore(MAX_EN_MEMORIA)
+
+processing_status: Dict[str, Any] = {
     "is_processing": False,
     "last_run": None,
     "total_photos": 0,
     "processed_photos": 0,
     "current_action": "Listo para recibir fotos del partido",
     "folders_created": {},
-    "logs": []
+    "logs": [],
+    "fase": "espera",          # espera | subiendo | analizando | carpetas | listo | error
+    "analizadas": 0,
+    "eta_seg": None,
+    "resumen": None,
+    "inicio": None,
+    "duracion_seg": None,
 }
+
 
 def log_event(message: str):
     logger.info(message)
@@ -68,793 +107,525 @@ def log_event(message: str):
     if len(processing_status["logs"]) > 50:
         processing_status["logs"].pop(0)
 
-def extract_facial_biometric_fingerprint(face_crop: np.ndarray) -> Optional[np.ndarray]:
-    """
-    Extrae la huella biométrica facial única del jugador (Descriptor LBP Espacial 256D).
-    Invariante a cambios de iluminación, sombras solares y expresiones del partido.
-    """
+
+def _analizar(key: str, datos: Optional[bytes]) -> Dict[str, Any]:
     try:
-        if face_crop is None or face_crop.size == 0:
-            return None
-        
-        # 1. Normalización geométrica 64x64
-        if len(face_crop.shape) == 3:
-            gray_face = cv2.cvtColor(face_crop, cv2.COLOR_BGR2GRAY)
-        else:
-            gray_face = face_crop.copy()
-            
-        face_norm = cv2.resize(gray_face, (64, 64), interpolation=cv2.INTER_AREA)
-        
-        # 2. Ecualización adaptativa CLAHE para anular sombras duras
-        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
-        enhanced = clahe.apply(face_norm)
-        
-        # 3. Cálculo de micro-textura LBP (Local Binary Patterns) vectorizado
-        h, w = enhanced.shape
-        lbp = np.zeros((h - 2, w - 2), dtype=np.uint8)
-        
-        center = enhanced[1:-1, 1:-1]
-        lbp |= ((enhanced[0:-2, 0:-2] >= center) << 7).astype(np.uint8)
-        lbp |= ((enhanced[0:-2, 1:-1] >= center) << 6).astype(np.uint8)
-        lbp |= ((enhanced[0:-2, 2:]   >= center) << 5).astype(np.uint8)
-        lbp |= ((enhanced[1:-1, 2:]   >= center) << 4).astype(np.uint8)
-        lbp |= ((enhanced[2:,   2:]   >= center) << 3).astype(np.uint8)
-        lbp |= ((enhanced[2:,   1:-1] >= center) << 2).astype(np.uint8)
-        lbp |= ((enhanced[2:,   0:-2] >= center) << 1).astype(np.uint8)
-        lbp |= ((enhanced[1:-1, 0:-2] >= center) << 0).astype(np.uint8)
-        
-        # 4. Cuadrícula espacial 4x4 de histogramas de 16 bins = 256 dimensiones
-        blocks_h, blocks_w = 4, 4
-        bh, bw = lbp.shape[0] // blocks_h, lbp.shape[1] // blocks_w
-        fingerprint = []
-        for i in range(blocks_h):
-            for j in range(blocks_w):
-                block = lbp[i*bh:(i+1)*bh, j*bw:(j+1)*bw]
-                hist, _ = np.histogram(block, bins=16, range=(0, 256))
-                fingerprint.extend(hist)
-                
-        vec = np.array(fingerprint, dtype=np.float32)
-        norm = np.linalg.norm(vec)
-        if norm > 0:
-            vec /= norm
-        return vec
+        if datos is None:
+            datos = ALMACEN.leer(key)
+        a = motor.analizar_foto(datos, os.path.basename(key))
     except Exception as e:
-        logger.error(f"Error extrayendo huella biométrica: {e}")
-        return None
-
-def compute_biometric_similarity(fp1: np.ndarray, fp2: np.ndarray) -> float:
-    """Calcula la similitud coseno entre dos huellas biométricas faciales (rango 0.0 a 1.0)."""
-    if fp1 is None or fp2 is None:
-        return 0.0
-    dot = float(np.dot(fp1, fp2))
-    return max(0.0, min(1.0, dot))
-
-def detect_dorsal_and_face(img_bytes: bytes) -> Dict[str, Any]:
-    """Detecta estrictamente el número de dorsal y extrae la huella biométrica facial del atleta."""
-    try:
-        nparr = np.frombuffer(img_bytes, np.uint8)
-        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        del nparr
-        if img is None:
-            return {"dorsal": None, "face_patch": None, "fingerprint": None}
-
-        h, w = img.shape[:2]
-        if max(h, w) > 850:
-            scale = 850.0 / max(h, w)
-            img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
-            h, w = img.shape[:2]
-
-        cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-        face_cascade = cv2.CascadeClassifier(cascade_path)
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(25, 25))
-        face_patch = None
-        face_fingerprint = None
-
-        if len(faces) > 0:
-            fx, fy, fw, fh = max(faces, key=lambda f: f[2] * f[3])
-            face_crop = gray[fy:fy+fh, fx:fx+fw]
-            if face_crop.size > 0:
-                face_patch = cv2.resize(face_crop, (64, 64))
-                face_patch = cv2.equalizeHist(face_patch)
-                face_fingerprint = extract_facial_biometric_fingerprint(face_crop)
-
-        # Búsqueda estricta de dorsal numérico (pecho, espalda o shorts) y verificación de uniforme
-        detected_dorsal = None
-
-        # 1. Detección de jugada grupal (3 o más rostros prominentes en disputa)
-        if len(faces) >= 3:
-            del gray, img
-            gc.collect()
-            return {"dorsal": None, "face_patch": None, "fingerprint": None, "is_group": True}
-
-        # 2. Análisis cromático del uniforme (Verde = Portero Trujillo #1, Azul/Amarillo = Jugador #13)
-        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-        torso_hsv = hsv[int(h*0.15):int(h*0.75), int(w*0.20):int(w*0.80)]
-        torso_pixels = max(1, torso_hsv.shape[0] * torso_hsv.shape[1])
-
-        green_mask = cv2.inRange(torso_hsv, np.array([35, 35, 35]), np.array([85, 255, 255]))
-        blue_mask = cv2.inRange(torso_hsv, np.array([95, 45, 35]), np.array([135, 255, 255]))
-
-        green_ratio = np.sum(green_mask > 0) / torso_pixels
-        blue_ratio = np.sum(blue_mask > 0) / torso_pixels
-
-        # 3. Lectura OCR estricta en torso y shorts
-        if pytesseract:
-            cy1, cy2 = int(h * 0.15), int(h * 0.70)
-            cx1, cx2 = int(w * 0.20), int(w * 0.80)
-            crop_torso = gray[cy1:cy2, cx1:cx2]
-
-            sy1, sy2 = int(h * 0.45), int(h * 0.85)
-            sx1, sx2 = int(w * 0.25), int(w * 0.75)
-            crop_shorts = gray[sy1:sy2, sx1:sx2]
-
-            # Búsqueda de texto explícito TRUJILLO o números exactos
-            for target in [crop_torso, crop_shorts]:
-                if target.size == 0:
-                    continue
-                clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-                enhanced = clahe.apply(target)
-                _, thresh = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-                thresh_inv = cv2.bitwise_not(thresh)
-
-                for t_img in [enhanced, thresh, thresh_inv]:
-                    cfg = "--psm 11"
-                    txt = pytesseract.image_to_string(t_img, config=cfg).upper()
-                    if "TRUJILLO" in txt:
-                        detected_dorsal = "1"
-                        break
-                    
-                    nums = re.findall(r'\b([1-9][0-9]?)\b', txt)
-                    for n in nums:
-                        if n in valid_dorsals:
-                            detected_dorsal = str(int(n))
-                            break
-                    if detected_dorsal:
-                        break
-                if detected_dorsal:
-                    break
-
-            del crop_torso, crop_shorts
-
-        # 4. Decisión armónica: Si el dorsal no fue detectado por OCR, usar el color del uniforme sin confundir
-        if not detected_dorsal:
-            if green_ratio > 0.05 and green_ratio > blue_ratio * 1.5:
-                detected_dorsal = "1"
-            elif blue_ratio > 0.05 and blue_ratio > green_ratio * 1.5:
-                detected_dorsal = "13"
-        elif detected_dorsal == "1" and blue_ratio > 0.12 and blue_ratio > green_ratio * 2.0:
-            # Corrección de seguridad: si un pliegue azul se leyó como 1 pero el uniforme es 100% azul
-            detected_dorsal = "13"
-        elif detected_dorsal != "1" and green_ratio > 0.12 and green_ratio > blue_ratio * 2.0:
-            # Corrección de seguridad: si la espalda de Trujillo se leyó como otro número pero viste de verde
-            detected_dorsal = "1"
-
-        del gray, img
+        logger.exception("No se pudo analizar %s: %s", key, e)
+        a = {"nombre": os.path.basename(key), "hora": None, "jugadores": [], "firma": None, "ok": False}
+    finally:
+        datos = None
         gc.collect()
+    a["key"] = key
+    for j in a.get("jugadores", []):
+        j.pop("torso", None)
+    with _lock:
+        processing_status["analizadas"] = sum(1 for f in _tareas.values() if f.done()) + 1
+    return a
 
-        return {
-            "dorsal": detected_dorsal,
-            "face_patch": face_patch,
-            "fingerprint": face_fingerprint
-        }
-    except Exception as e:
-        logger.error(f"Error detectando dorsal y rostro: {e}")
-        return {"dorsal": None, "face_patch": None, "fingerprint": None}
 
-def get_folder_for_dorsal(d_val: int) -> str:
-    """Genera el nombre de la carpeta: Dorsal_XX_Nombre si se conoce el nombre, o Dorsal_XX si solo tiene dorsal."""
-    s_d = str(d_val)
-    if s_d in player_names and player_names[s_d]:
-        return f"organizadas/Dorsal_{d_val:02d}_{player_names[s_d]}"
-    return f"organizadas/Dorsal_{d_val:02d}"
-
-def classify_strictly_by_dorsal_and_name(photo_items: List[Dict[str, Any]]) -> Dict[str, List[str]]:
-    """
-    Clasificación ESTRICTA por HUELLA BIOMÉTRICA FACIAL (LBP Espacial) y DORSAL/NOMBRE:
-    - Agrupa 100% de las fotos del mismo jugador en su única carpeta.
-    - Asigna nombres según formato: Dorsal_XX_Nombre (si se detecta) o Dorsal_XX (si solo hay dorsal).
-    """
-    folders_result = {}
-    general_files = []
-
-    # Clasificación precisa y verificada foto a foto para el lote del partido
-    for item in photo_items:
-        key = item["key"]
-        fn = os.path.basename(key).upper()
-
-        # 1. Portero Trujillo (#1) - 6 fotos confirmadas
-        if any(x in fn for x in ["2156", "2157", "2158", "2159", "2161", "2162"]):
-            folders_result.setdefault("organizadas/Dorsal_01_Trujillo", []).append(key)
-        # 2. Jugadas disputadas de grupo - 2 fotos confirmadas
-        elif any(x in fn for x in ["2171", "2177"]):
-            folders_result.setdefault("organizadas/00_Fotos_Generales_Equipo", []).append(key)
-        # 3. Jugador de campo (#13) - 8 fotos confirmadas
-        elif any(x in fn for x in ["2170", "2172", "2173", "2174", "2175", "2176", "2178", "2179"]):
-            folders_result.setdefault("organizadas/Dorsal_13", []).append(key)
+def _encolar(key: str, datos: Optional[bytes]):
+    """Lanza el analisis de una foto. Si hay muchas en cola, no guarda sus bytes (se releen luego)."""
+    with _lock:
+        if key in _tareas:
+            return
+        if datos is not None and _en_memoria.acquire(blocking=False):
+            def tarea(k=key, d=datos):
+                try:
+                    return _analizar(k, d)
+                finally:
+                    _en_memoria.release()
+            _tareas[key] = EJECUTOR.submit(tarea)
         else:
-            # Flujo dinámico biométrico para fotos adicionales de futuros partidos
-            dorsal = item["features"].get("dorsal")
-            if dorsal and dorsal in valid_dorsals:
-                folder_name = get_folder_for_dorsal(int(dorsal))
-                folders_result.setdefault(folder_name, []).append(key)
-            else:
-                folders_result.setdefault("organizadas/00_Fotos_Generales_Equipo", []).append(key)
+            _tareas[key] = EJECUTOR.submit(_analizar, key, None)
 
-    return folders_result
 
-def process_photos_task():
-    """Ejecuta la clasificación estricta por dorsal y nombre garantizando que el 100% de las fotos se guardan."""
-    global processing_status
-    processing_status["is_processing"] = True
-    processing_status["logs"] = []
-    log_event("Analizando fotos del partido por dorsal y nombre...")
+# Compatibilidad con los nombres del pipeline anterior ---------------------------------
+def detect_dorsal_and_face(img_bytes: bytes) -> Dict[str, Any]:
+    """Huella de cada jugador visible en la foto (rostro SFace, dorsal 1-99, color/texto de camiseta)."""
+    return motor.analizar_foto(img_bytes)
 
-    s3 = get_r2_client()
-    if not s3:
-        log_event("ERROR: Cloudflare R2 no conectado.")
-        processing_status["is_processing"] = False
-        return
 
+def classify_dynamically_by_dorsal_and_biometrics(photo_items: List[Dict[str, Any]], nomina: str = "") -> Dict[str, List[str]]:
+    """Agrupa todo el lote en carpetas unicas por jugador (dorsal + biometria facial + rafagas)."""
+    return identidad.clasificar_lote(photo_items, nomina)["carpetas"]
+
+
+# ------------------------------------------------------------------ utilidades de sesion
+def _fotos_sesion() -> List[str]:
+    return [k for k, _ in ALMACEN.listar("") if "/" not in k and k.lower().endswith(EXT_IMG)]
+
+
+def _nombre_seguro(nombre: str) -> str:
+    base = os.path.basename((nombre or "foto.jpg").replace("\\", "/"))
+    base = re.sub(r"[^\w\-. ]", "_", base, flags=re.UNICODE).strip() or "foto.jpg"
+    if not base.lower().endswith(EXT_IMG):
+        base += ".jpg"
+    return base[:120]
+
+
+def _leer_sesion() -> Dict[str, Any]:
     try:
-        response = s3.list_objects_v2(Bucket=R2_BUCKET_NAME)
-        objects = response.get("Contents", [])
-        
-        image_extensions = ('.jpg', '.jpeg', '.png', '.webp')
-        pending_photos = [
-            obj["Key"] for obj in objects 
-            if obj["Key"].lower().endswith(image_extensions) 
-            and not obj["Key"].startswith("organizadas/")
-            and not obj["Key"].startswith("boveda_respaldo/")
-        ]
+        return json.loads(ALMACEN.leer(PREF_SESION + "resultado.json").decode("utf-8"))
+    except Exception:
+        return {}
 
-        # Si no hay fotos en la raíz, re-clasificar desde la Bóveda de Respaldo
-        if not pending_photos:
-            pending_photos = [
-                obj["Key"] for obj in objects
-                if obj["Key"].lower().endswith(image_extensions)
-                and obj["Key"].startswith("boveda_respaldo/")
-            ]
 
-        processing_status["total_photos"] = len(pending_photos)
+def _guardar_sesion(d: Dict[str, Any]):
+    ALMACEN.subir(PREF_SESION + "resultado.json", json.dumps(d, ensure_ascii=False).encode("utf-8"), "application/json")
+
+
+def _limpiar_sesion(borrar_fotos: bool = True):
+    """Borra carpetas organizadas, miniaturas y (si se pide) las fotos crudas de la sesion.
+    Las fotos crudas ya estan respaldadas en la boveda desde que se subieron."""
+    with _lock:
+        for f in _tareas.values():
+            f.cancel()
+        _tareas.clear()
+    if ALMACEN:
+        for p in (PREF_ORG, PREF_MINI, PREF_SESION):
+            ALMACEN.borrar_prefijo(p)
+        if borrar_fotos:
+            ALMACEN.borrar(_fotos_sesion())
+    processing_status.update({
+        "folders_created": {}, "logs": [], "current_action": "Listo para recibir fotos del partido",
+        "fase": "espera", "analizadas": 0, "total_photos": 0, "processed_photos": 0, "eta_seg": None,
+        "resumen": None, "inicio": None, "duracion_seg": None,
+    })
+
+
+# ------------------------------------------------------------------ pipeline principal
+def process_photos_task(nomina: str = ""):
+    """Espera los analisis (que empezaron durante la subida), agrupa por jugador y escribe las carpetas."""
+    if not ALMACEN:
+        log_event("ERROR: almacenamiento (Cloudflare R2) no conectado.")
+        processing_status["fase"] = "error"
+        return
+    processing_status["is_processing"] = True
+    processing_status["fase"] = "analizando"
+    processing_status["inicio"] = processing_status.get("inicio") or time.time()
+    try:
+        if not motor.modelos_disponibles():
+            raise RuntimeError(f"Faltan los modelos biometricos en {motor.MODELS_DIR}")
+        keys = sorted(_fotos_sesion())
+        processing_status["total_photos"] = len(keys)
+        processing_status["processed_photos"] = 0
+        if not keys:
+            log_event("No hay fotos para organizar.")
+            processing_status["fase"] = "espera"
+            return
+        for k in keys:
+            _encolar(k, None)
+        log_event(f"Analizando rostros y dorsales de {len(keys)} fotos...")
+        t0, base = time.time(), sum(1 for k in keys if _tareas[k].done())
+        while True:
+            hechas = sum(1 for k in keys if _tareas[k].done())
+            processing_status["processed_photos"] = hechas
+            processing_status["analizadas"] = hechas
+            if hechas > base:
+                vel = (time.time() - t0) / (hechas - base)
+                processing_status["eta_seg"] = int(vel * (len(keys) - hechas)) + 5
+            processing_status["current_action"] = f"Analizando rostros y dorsales: {hechas}/{len(keys)} fotos"
+            if hechas >= len(keys):
+                break
+            time.sleep(0.5)
+        analisis = []
+        for k in keys:
+            try:
+                analisis.append(_tareas[k].result())
+            except Exception as e:
+                logger.error("Analisis fallido %s: %s", k, e)
+                analisis.append({"key": k, "jugadores": [], "hora": None, "firma": None})
+
+        processing_status["fase"] = "carpetas"
+        log_event("Uniendo huellas biometricas y creando una carpeta por jugador...")
+        res = identidad.clasificar_lote(analisis, nomina)
+
+        ALMACEN.borrar_prefijo(PREF_ORG)
+        ALMACEN.borrar_prefijo(PREF_MINI)
+        copias = [(k, f"{PREF_ORG}{carpeta}/{os.path.basename(k)}") for carpeta, ks in res["carpetas"].items() for k in ks]
+        processing_status["total_photos"] = len(copias)
         processing_status["processed_photos"] = 0
 
-        if not pending_photos:
-            log_event("No hay fotos para organizar.")
-            processing_status["is_processing"] = False
-            return
+        def copiar(par):
+            ALMACEN.copiar(*par)
+            processing_status["processed_photos"] += 1
 
-        # 1. Copia de seguridad en la Bóveda de Respaldo para fotos nuevas
-        for key in pending_photos:
-            if not key.startswith("boveda_respaldo/"):
-                filename = os.path.basename(key)
-                s3.copy_object(
-                    Bucket=R2_BUCKET_NAME,
-                    CopySource={'Bucket': R2_BUCKET_NAME, 'Key': key},
-                    Key=f"boveda_respaldo/{filename}"
-                )
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            list(ex.map(copiar, copias))
+        for carpeta, jpg in res["miniaturas"].items():
+            ALMACEN.subir(f"{PREF_MINI}{carpeta}.jpg", jpg)
 
-        # 2. Detección estricta de dorsal y huella biométrica facial
-        photo_items = []
-        for idx, key in enumerate(pending_photos, 1):
-            filename = os.path.basename(key)
-            log_event(f"[{idx}/{len(pending_photos)}] Escaneando huella biométrica: {filename}...")
-            
-            obj = s3.get_object(Bucket=R2_BUCKET_NAME, Key=key)
-            img_bytes = obj['Body'].read()
-            feat = detect_dorsal_and_face(img_bytes)
-            photo_items.append({"key": key, "features": feat})
-            del img_bytes
-            gc.collect()
-
-        # 3. Clasificación estricta por Huella Biométrica Facial y Dorsal/Nombre
-        log_event("Creando carpetas personalizadas únicas por jugador...")
-        folders_map = classify_strictly_by_dorsal_and_name(photo_items)
-
-        # 4. Limpiar carpetas organizadas viejas antes de guardar la nueva estructura
-        paginator = s3.get_paginator('list_objects_v2')
-        for page in paginator.paginate(Bucket=R2_BUCKET_NAME, Prefix="organizadas/"):
-            contents = page.get("Contents", [])
-            if contents:
-                delete_keys = [{'Key': o['Key']} for o in contents]
-                s3.delete_objects(Bucket=R2_BUCKET_NAME, Delete={'Objects': delete_keys})
-
-        # 5. Guardar en Cloudflare R2 garantizando 1 sola carpeta por jugador
-        for folder_name, files in folders_map.items():
-            for key in files:
-                filename = os.path.basename(key)
-                destination_key = f"{folder_name}/{filename}"
-                s3.copy_object(
-                    Bucket=R2_BUCKET_NAME,
-                    CopySource={'Bucket': R2_BUCKET_NAME, 'Key': key},
-                    Key=destination_key
-                )
-                processing_status["processed_photos"] += 1
-
-        processing_status["folders_created"] = {k: len(v) for k, v in folders_map.items()}
-        log_event("¡Listo! Todas las fotos quedaron organizadas por huella biométrica y dorsal.")
-
+        processing_status["folders_created"] = {k: len(v) for k, v in res["carpetas"].items()}
+        processing_status["resumen"] = res["resumen"]
+        processing_status["duracion_seg"] = int(time.time() - processing_status["inicio"])
+        _guardar_sesion({"resumen": res["resumen"], "detalle": res["detalle"], "dudas": res["dudas"], "nomina": nomina,
+                         "fotos": len(keys), "fecha": time.strftime("%Y-%m-%d %H:%M")})
+        processing_status["fase"] = "listo"
+        processing_status["last_run"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        r = res["resumen"]
+        log_event(f"¡Listo! {r['jugadores']} jugadores identificados en {r['fotos']} fotos.")
     except Exception as e:
-        log_event(f"Error procesando fotos: {str(e)}")
+        logger.exception("Error procesando fotos")
+        processing_status["fase"] = "error"
+        log_event(f"Error procesando fotos: {e}")
     finally:
         processing_status["is_processing"] = False
+        processing_status["eta_seg"] = None
         gc.collect()
 
+
+# ------------------------------------------------------------------ endpoints
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
+
+@app.get("/api/diagnostico")
+def diagnostico():
+    return {"almacen": type(ALMACEN).__name__ if ALMACEN else None, "modelos": motor.modelos_disponibles(),
+            "cpus": CPUS, "hilos_analisis": HILOS, "opencv": cv2.__version__, "version": app.version}
+
+
 @app.get("/logo.png")
 def get_logo():
-    if os.path.exists("logo.png"):
-        return FileResponse("logo.png", media_type="image/png")
+    ruta = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png")
+    if os.path.exists(ruta):
+        return FileResponse(ruta, media_type="image/png")
     return JSONResponse({"error": "No logo"}, status_code=404)
+
 
 @app.get("/api/estado")
 def get_status():
     return processing_status
 
+
 @app.get("/api/carpetas")
 def get_folders():
-    s3 = get_r2_client()
-    if not s3:
+    if not ALMACEN:
         return {"folders": {}}
     try:
-        response = s3.list_objects_v2(Bucket=R2_BUCKET_NAME, Prefix="organizadas/")
-        objects = response.get("Contents", [])
-        result = {}
-        for obj in objects:
-            key = obj["Key"]
+        result: Dict[str, List[str]] = {}
+        for key, _ in ALMACEN.listar(PREF_ORG):
             parts = key.split("/")
             if len(parts) >= 3:
-                folder_name = parts[1]
-                filename = parts[2]
-                result.setdefault(folder_name, []).append(filename)
-        return {"folders": result}
+                result.setdefault(parts[1], []).append(parts[2])
+        ses = _leer_sesion()
+        dudas = [d for d in ses.get("dudas", []) if d.get("estado") == "pendiente"]
+        return {"folders": result, "detalle": ses.get("detalle", {}), "resumen": ses.get("resumen"), "dudas": dudas}
     except Exception as e:
+        logger.error("carpetas: %s", e)
         return {"folders": {}}
+
+
+@app.get("/api/miniatura/{carpeta}")
+def get_thumbnail(carpeta: str):
+    try:
+        return Response(ALMACEN.leer(f"{PREF_MINI}{carpeta}.jpg"), media_type="image/jpeg",
+                        headers={"Cache-Control": "no-cache"})
+    except Exception:
+        return Response(status_code=404)
+
+
+@app.get("/api/miniatura-duda/{duda_id}")
+def get_doubt_thumbnail(duda_id: str):
+    try:
+        return Response(ALMACEN.leer(f"{PREF_MINI}_dudas/{re.sub(r'[^a-z0-9]', '', duda_id)}.jpg"), media_type="image/jpeg")
+    except Exception:
+        return Response(status_code=404)
+
+
+@app.post("/api/confirmar")
+async def confirmar_duda(request: Request):
+    """El fotografo responde una duda: si=True mete la foto en la carpeta del jugador; si=False la descarta."""
+    d = await request.json()
+    did, si = str(d.get("id", "")), bool(d.get("si"))
+
+    def aplicar():
+        ses = _leer_sesion()
+        duda = next((x for x in ses.get("dudas", []) if x["id"] == did), None)
+        if not duda:
+            return {"error": "Duda no encontrada"}
+        if duda["estado"] != "pendiente":
+            return {"ok": True, "ya": duda["estado"]}
+        duda["estado"] = "si" if si else "no"
+        carpeta = duda["carpeta"]
+        if si:
+            # si la carpeta cambio de nombre en la revision, buscar su nombre actual por dorsal/equipo
+            fotos = [duda["foto"]] + ([duda["foto_ref"]] if duda.get("foto_ref") else [])
+            for k in fotos:
+                dst = f"{PREF_ORG}{carpeta}/{os.path.basename(k)}"
+                if not ALMACEN.existe(dst):
+                    ALMACEN.copiar(k, dst)
+                # ya tiene carpeta de jugador: sale de Generales
+                ALMACEN.borrar([f"{PREF_ORG}{GENERAL}/{os.path.basename(k)}"])
+            det = ses.setdefault("detalle", {}).setdefault(carpeta, {"equipo": duda.get("equipo"), "dorsal": duda.get("dorsal")})
+            det["fotos"] = len(ALMACEN.listar(f"{PREF_ORG}{carpeta}/"))
+            # las demas dudas que usaban esta misma foto de referencia ya no necesitan volver a copiarla
+        _guardar_sesion(ses)
+        pend = sum(1 for x in ses["dudas"] if x["estado"] == "pendiente")
+        return {"ok": True, "pendientes": pend}
+
+    r = await run_in_threadpool(aplicar)
+    return JSONResponse(r, status_code=404 if "error" in r else 200)
+
+
+_cache_vistas: Dict[str, bytes] = {}
+
+
+@app.get("/api/vista/{carpeta}/{archivo}")
+def get_preview(carpeta: str, archivo: str):
+    """Vista previa liviana (360 px) de una foto de una carpeta, para revisar sin descargar.
+    carpeta='_original' muestra la foto subida (para las dudas, que aun no estan en ninguna carpeta)."""
+    key = _nombre_seguro(archivo) if carpeta == "_original" else f"{PREF_ORG}{carpeta}/{archivo}"
+    if key in _cache_vistas:
+        return Response(_cache_vistas[key], media_type="image/jpeg")
+    try:
+        datos = ALMACEN.leer(key)
+        img = cv2.imdecode(np.frombuffer(datos, np.uint8), cv2.IMREAD_REDUCED_COLOR_4)
+        h, w = img.shape[:2]
+        s = 360 / max(h, w)
+        img = cv2.resize(img, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA)
+        ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 78])
+        out = buf.tobytes()
+        if len(_cache_vistas) > 400:
+            _cache_vistas.clear()
+        _cache_vistas[key] = out
+        return Response(out, media_type="image/jpeg")
+    except Exception:
+        return Response(status_code=404)
+
+
+def _mover_carpeta(origen: str, destino: str):
+    """Mueve (o une) las fotos y la miniatura de una carpeta de jugador a otra."""
+    if origen == destino:
+        return
+    existentes = {os.path.basename(k) for k, _ in ALMACEN.listar(f"{PREF_ORG}{destino}/")}
+    keys = [k for k, _ in ALMACEN.listar(f"{PREF_ORG}{origen}/")]
+    for k in keys:
+        if os.path.basename(k) not in existentes:
+            ALMACEN.copiar(k, f"{PREF_ORG}{destino}/{os.path.basename(k)}")
+    ALMACEN.borrar(keys)
+    mo, md = f"{PREF_MINI}{origen}.jpg", f"{PREF_MINI}{destino}.jpg"
+    if ALMACEN.existe(mo):
+        if not ALMACEN.existe(md):
+            ALMACEN.copiar(mo, md)
+        ALMACEN.borrar([mo])
+
+
+@app.post("/api/corregir")
+async def corregir_carpeta(request: Request):
+    """Corrige numero/nombre/equipo de una ficha. Si el nombre resultante ya existe, las fichas se UNEN."""
+    if not ALMACEN:
+        return JSONResponse({"error": "Almacen no conectado"}, status_code=500)
+    d = await request.json()
+    carpeta = str(d.get("carpeta", ""))
+    dorsal = re.sub(r"\D", "", str(d.get("dorsal", "")))[:2]
+    nombre = identidad.limpiar_nombre(str(d.get("nombre", "")))
+    equipo = identidad.limpiar_nombre(str(d.get("equipo", ""))) or "Sin_Equipo"
+    if not carpeta or carpeta == GENERAL:
+        return JSONResponse({"error": "Carpeta invalida"}, status_code=400)
+    if dorsal and int(dorsal) > 0:
+        nueva = f"Dorsal_{int(dorsal):02d}_{equipo}" + (f"_{nombre}" if nombre else "")
+    elif nombre:
+        nueva = f"{nombre}_{equipo}"
+    else:
+        return JSONResponse({"error": "Escribe al menos el numero o el nombre"}, status_code=400)
+
+    def mover():
+        ses = _leer_sesion()
+        detalle = ses.get("detalle", {})
+        unida = False
+        # si ya hay otra ficha con el mismo numero y equipo, es el mismo jugador: se unen en una sola
+        if dorsal:
+            pref = f"Dorsal_{int(dorsal):02d}_{equipo}"
+            gemela = next((c for c in sorted({k.split("/")[1] for k, _ in ALMACEN.listar(PREF_ORG)})
+                           if c != carpeta and (c == pref or c.startswith(pref + "_"))), None)
+            if gemela:
+                _mover_carpeta(carpeta, gemela)
+                detalle.pop(carpeta, None)
+                carpeta_actual, unida = gemela, True
+            else:
+                carpeta_actual = carpeta
+        else:
+            carpeta_actual = carpeta
+        if carpeta_actual != nueva:
+            unida = unida or bool(ALMACEN.listar(f"{PREF_ORG}{nueva}/"))
+            _mover_carpeta(carpeta_actual, nueva)
+            detalle.pop(carpeta_actual, None)
+        detalle[nueva] = {"equipo": equipo, "dorsal": dorsal or None, "nombre": nombre or None, "revisada": True,
+                          "fotos": len(ALMACEN.listar(f"{PREF_ORG}{nueva}/"))}
+        ses["detalle"] = detalle
+        for duda in ses.get("dudas", []):   # las dudas pendientes siguen a su jugador
+            if duda["carpeta"] in (carpeta, carpeta_actual):
+                duda["carpeta"], duda["dorsal"], duda["equipo"] = nueva, dorsal or None, equipo
+        _guardar_sesion(ses)
+        return {"carpeta": nueva, "unida": unida}
+
+    try:
+        return await run_in_threadpool(mover)
+    except Exception as e:
+        logger.exception("corregir")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/a-generales")
+async def mover_a_generales(request: Request):
+    """La ficha no es un jugador (publico, arbitro...): sus fotos pasan a Generales si no estan en otra carpeta."""
+    d = await request.json()
+    carpeta = str(d.get("carpeta", ""))
+    if not carpeta or carpeta == GENERAL:
+        return JSONResponse({"error": "Carpeta invalida"}, status_code=400)
+
+    def mover():
+        origen = [k for k, _ in ALMACEN.listar(f"{PREF_ORG}{carpeta}/")]
+        en_otras = {os.path.basename(k) for k, _ in ALMACEN.listar(PREF_ORG) if not k.startswith(f"{PREF_ORG}{carpeta}/")}
+        for k in origen:
+            if os.path.basename(k) not in en_otras:
+                ALMACEN.copiar(k, f"{PREF_ORG}{GENERAL}/{os.path.basename(k)}")
+        ALMACEN.borrar(origen + [f"{PREF_MINI}{carpeta}.jpg"])
+        ses = _leer_sesion()
+        ses.get("detalle", {}).pop(carpeta, None)
+        for duda in ses.get("dudas", []):
+            if duda["carpeta"] == carpeta and duda["estado"] == "pendiente":
+                duda["estado"] = "descartada"
+        _guardar_sesion(ses)
+        return {"ok": True}
+
+    return await run_in_threadpool(mover)
+
 
 @app.get("/api/boveda")
 def get_backup_vault():
-    s3 = get_r2_client()
-    if not s3:
-        return {"backup_photos": []}
-    try:
-        response = s3.list_objects_v2(Bucket=R2_BUCKET_NAME, Prefix="boveda_respaldo/")
-        objects = response.get("Contents", [])
-        files = [os.path.basename(obj["Key"]) for obj in objects if not obj["Key"].endswith("/")]
-        return {"backup_photos": files, "count": len(files)}
-    except Exception as e:
+    if not ALMACEN:
         return {"backup_photos": [], "count": 0}
+    try:
+        files = [os.path.basename(k) for k, _ in ALMACEN.listar(PREF_BOVEDA)]
+        return {"backup_photos": files, "count": len(files)}
+    except Exception:
+        return {"backup_photos": [], "count": 0}
+
 
 @app.get("/api/boveda/foto/{filename}")
 def get_backup_photo(filename: str):
-    s3 = get_r2_client()
-    if not s3:
+    if not ALMACEN:
         return JSONResponse({"error": "No R2"}, status_code=500)
     try:
-        obj = s3.get_object(Bucket=R2_BUCKET_NAME, Key=f"boveda_respaldo/{filename}")
-        return StreamingResponse(
-            obj["Body"],
-            media_type="image/jpeg",
-            headers={"Content-Disposition": f"attachment; filename={filename}"}
-        )
+        datos = ALMACEN.leer(PREF_BOVEDA + _nombre_seguro(filename))
+        return Response(datos, media_type="image/jpeg",
+                        headers={"Content-Disposition": f'attachment; filename="{_nombre_seguro(filename)}"'})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=404)
 
+
 @app.post("/api/procesar")
-def trigger_process(background_tasks: BackgroundTasks):
+def trigger_process(background_tasks: BackgroundTasks, nomina: str = Form("")):
     if processing_status["is_processing"]:
         return JSONResponse({"status": "busy", "message": "Ya hay un proceso en marcha."})
-    background_tasks.add_task(process_photos_task)
-    return {"status": "started", "message": "Clasificación estricta por dorsal y nombre iniciada."}
+    processing_status["is_processing"] = True   # evita doble clic mientras arranca
+    background_tasks.add_task(process_photos_task, nomina)
+    return {"status": "started", "message": "Organizacion biometrica por jugador iniciada."}
+
 
 @app.post("/api/limpiar")
 def clean_previous_session():
-    """Borra las fotos organizadas viejas para dejar la pantalla completamente limpia."""
-    s3 = get_r2_client()
-    if not s3:
+    """Deja todo listo para un partido nuevo (la boveda de respaldo NO se toca)."""
+    if not ALMACEN:
         return JSONResponse({"error": "No R2"}, status_code=500)
+    if processing_status["is_processing"]:
+        return JSONResponse({"error": "Hay un proceso en marcha"}, status_code=409)
     try:
-        paginator = s3.get_paginator('list_objects_v2')
-        for page in paginator.paginate(Bucket=R2_BUCKET_NAME, Prefix="organizadas/"):
-            contents = page.get("Contents", [])
-            if contents:
-                delete_keys = [{'Key': obj['Key']} for obj in contents]
-                s3.delete_objects(Bucket=R2_BUCKET_NAME, Delete={'Objects': delete_keys})
-
-        processing_status["folders_created"] = {}
-        processing_status["logs"] = []
-        processing_status["current_action"] = "Listo para recibir fotos del partido"
+        _limpiar_sesion(borrar_fotos=True)
         return {"status": "ok", "message": "Sesión limpiada con éxito."}
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
+
 @app.post("/api/subir-y-procesar")
-async def upload_and_process(background_tasks: BackgroundTasks, files: List[UploadFile] = File(...)):
-    s3 = get_r2_client()
-    if not s3:
+async def upload_and_process(background_tasks: BackgroundTasks, files: List[UploadFile] = File(...),
+                             limpiar: int = 1, procesar: int = 1, nomina: str = Form("")):
+    """Recibe fotos. La pantalla nueva las manda por tandas (limpiar=1 solo en la primera, procesar=0)
+    y al final llama a /api/procesar. Llamado sin parametros se comporta como antes: limpia, sube y procesa."""
+    if not ALMACEN:
         return JSONResponse({"error": "R2 no conectado."}, status_code=500)
-
-    clean_previous_session()
-
+    if limpiar:
+        if processing_status["is_processing"]:
+            return JSONResponse({"error": "Hay un proceso en marcha"}, status_code=409)
+        await run_in_threadpool(_limpiar_sesion, True)
+        processing_status["inicio"] = time.time()
+    processing_status["fase"] = "subiendo"
     count = 0
     for file in files:
-        if file.filename:
-            s3.upload_fileobj(file.file, R2_BUCKET_NAME, file.filename)
-            count += 1
+        if not file.filename:
+            continue
+        datos = await file.read()
+        nombre = _nombre_seguro(file.filename)
 
-    background_tasks.add_task(process_photos_task)
+        def guardar(nombre=nombre, datos=datos):
+            key = nombre
+            if ALMACEN.existe(key):   # mismo nombre de archivo de otra camara en este partido
+                b, e = os.path.splitext(nombre)
+                i = 2
+                while ALMACEN.existe(f"{b}_{i}{e}"):
+                    i += 1
+                key = f"{b}_{i}{e}"
+            ALMACEN.subir(key, datos)
+            bkey = PREF_BOVEDA + key
+            if ALMACEN.existe(bkey):
+                bkey = PREF_BOVEDA + time.strftime("%Y%m%d-%H%M%S_") + key
+            ALMACEN.copiar(key, bkey)
+            return key
+
+        key = await run_in_threadpool(guardar)
+        _encolar(key, datos)          # el analisis empieza ya, mientras siguen llegando fotos
+        datos = None
+        count += 1
+    processing_status["total_photos"] = len(_tareas)
+    if procesar:
+        if not processing_status["is_processing"]:
+            processing_status["is_processing"] = True
+            background_tasks.add_task(process_photos_task, nomina)
     return {"status": "ok", "uploaded": count, "message": f"{count} fotos subidas."}
 
+
+def _armar_zip(prefijo: str, renombrar) -> str:
+    fd, ruta = tempfile.mkstemp(suffix=".zip")
+    os.close(fd)
+    with zipfile.ZipFile(ruta, "w", zipfile.ZIP_STORED, allowZip64=True) as zf:   # JPG ya va comprimido
+        for key, _ in ALMACEN.listar(prefijo):
+            with zf.open(renombrar(key), "w", force_zip64=True) as dst:
+                ALMACEN.descargar_a(key, dst)
+    return ruta
+
+
 @app.get("/api/descargar-zip")
-def download_all_zip(background_tasks: BackgroundTasks):
-    s3 = get_r2_client()
-    if not s3:
+def download_all_zip():
+    """ZIP con una carpeta por jugador. Se arma en disco (no en RAM) para aguantar partidos grandes.
+    La sesion NO se borra al descargar: si la descarga falla se puede repetir; se limpia al empezar otro partido."""
+    if not ALMACEN:
         return JSONResponse({"error": "No R2"}, status_code=500)
+    ruta = _armar_zip(PREF_ORG, lambda k: k[len(PREF_ORG):])
+    logger.info("ZIP generado: %s bytes", os.path.getsize(ruta))
+    return FileResponse(ruta, media_type="application/zip", filename="Fotos_Organizadas_CastilloEnfoca.zip",
+                        background=BackgroundTask(os.remove, ruta))
 
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-        paginator = s3.get_paginator('list_objects_v2')
-        for page in paginator.paginate(Bucket=R2_BUCKET_NAME, Prefix="organizadas/"):
-            for obj in page.get("Contents", []):
-                key = obj["Key"]
-                if not key.endswith("/"):
-                    file_obj = s3.get_object(Bucket=R2_BUCKET_NAME, Key=key)
-                    zip_file.writestr(key.replace("organizadas/", ""), file_obj["Body"].read())
-
-    zip_buffer.seek(0)
-    zip_bytes = zip_buffer.getvalue()
-    logger.info(f"ZIP de fotos organizadas generado con éxito: {len(zip_bytes)} bytes.")
-
-    # Limpiar automáticamente la sesión e historial en segundo plano tras enviar el archivo
-    background_tasks.add_task(clean_previous_session)
-
-    return Response(
-        content=zip_bytes,
-        media_type="application/zip",
-        headers={"Content-Disposition": "attachment; filename=Fotos_Organizadas_CastilloEnfoca.zip"}
-    )
 
 @app.get("/api/descargar-boveda-zip")
 def download_backup_vault_zip():
-    s3 = get_r2_client()
-    if not s3:
+    if not ALMACEN:
         return JSONResponse({"error": "No R2"}, status_code=500)
+    ruta = _armar_zip(PREF_BOVEDA, lambda k: "Respaldo_Seguridad/" + k[len(PREF_BOVEDA):])
+    return FileResponse(ruta, media_type="application/zip", filename="Boveda_Respaldo_CastilloEnfoca.zip",
+                        background=BackgroundTask(os.remove, ruta))
 
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-        response = s3.list_objects_v2(Bucket=R2_BUCKET_NAME, Prefix="boveda_respaldo/")
-        for obj in response.get("Contents", []):
-            key = obj["Key"]
-            if not key.endswith("/"):
-                file_obj = s3.get_object(Bucket=R2_BUCKET_NAME, Key=key)
-                zip_file.writestr(key.replace("boveda_respaldo/", "Respaldo_Seguridad/"), file_obj["Body"].read())
-
-    zip_buffer.seek(0)
-    return StreamingResponse(
-        zip_buffer,
-        media_type="application/zip",
-        headers={"Content-Disposition": "attachment; filename=Boveda_Respaldo_CastilloEnfoca.zip"}
-    )
 
 @app.get("/")
 def clean_dashboard():
-    html = """
-    <!DOCTYPE html>
-    <html lang="es">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
-        <meta http-equiv="Pragma" content="no-cache">
-        <meta http-equiv="Expires" content="0">
-        <title>CastilloEnfoca - Organizador Oficial</title>
-        <style>
-            * { box-sizing: border-box; margin: 0; padding: 0; }
-            body { 
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; 
-                background-color: #0b0504; 
-                background-image: 
-                    radial-gradient(circle at 85% 15%, #2a0f08 0%, transparent 55%), 
-                    radial-gradient(circle at 10% 85%, #1e0a05 0%, transparent 50%), 
-                    radial-gradient(rgba(234, 88, 12, 0.14) 1.2px, transparent 1.2px); 
-                background-size: 100% 100%, 100% 100%, 28px 28px; 
-                background-attachment: fixed; 
-                color: #ffffff; 
-                padding: 16px; 
-                position: relative;
-                min-height: 100vh;
-            }
-            .watermark-01 {
-                position: fixed;
-                top: 5px;
-                right: 25px;
-                font-size: 140px;
-                font-weight: 900;
-                color: transparent;
-                -webkit-text-stroke: 1.5px rgba(234, 88, 12, 0.14);
-                pointer-events: none;
-                z-index: 0;
-                letter-spacing: -6px;
-                font-family: monospace, sans-serif;
-            }
-            .container { max-width: 520px; margin: 0 auto; position: relative; z-index: 1; }
-            
-            .header { text-align: center; margin-bottom: 24px; padding-top: 10px; }
-            .logo-img { width: 110px; height: 110px; border-radius: 50%; margin: 0 auto 12px auto; display: block; box-shadow: 0 0 25px rgba(239, 68, 68, 0.45); border: 2px solid #ef4444; }
-            .header h1 { font-size: 26px; font-weight: 900; letter-spacing: 1px; margin-bottom: 2px; }
-            .brand-white { color: #ffffff; }
-            .brand-red { color: #f97316; }
-            .header p { color: #a89f91; font-size: 14px; }
-
-            .card { background: #150a07; border-radius: 18px; padding: 22px; margin-bottom: 16px; border: 1px solid #36170e; box-shadow: 0 10px 32px rgba(0,0,0,0.65), inset 0 1px 0 rgba(234, 88, 12, 0.12); }
-            
-            .upload-box { border: 2px dashed #ea580c; border-radius: 14px; padding: 34px 18px; text-align: center; cursor: pointer; background: #1c0e09; transition: 0.2s; box-shadow: inset 0 0 20px rgba(234, 88, 12, 0.05); }
-            .upload-box:active { background: #2a140d; border-color: #f97316; }
-            .upload-icon { font-size: 46px; margin-bottom: 8px; }
-            .upload-text { font-size: 17px; font-weight: bold; color: #ffffff; }
-            .upload-hint { font-size: 13px; color: #a89f91; margin-top: 4px; }
-            
-            input[type="file"] { display: none; }
-            
-            .btn-action { width: 100%; background: linear-gradient(135deg, #ea580c 0%, #c2410c 100%); color: white; border: none; padding: 18px; border-radius: 14px; font-size: 18px; font-weight: 900; cursor: pointer; margin-top: 16px; display: none; box-shadow: 0 4px 20px rgba(234, 88, 12, 0.45); text-transform: uppercase; }
-            .btn-action:active { transform: scale(0.98); }
-            .btn-action:disabled { background: #2d1810; box-shadow: none; color: #786558; }
-
-            .btn-download { width: 100%; background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: white; border: none; padding: 18px; border-radius: 14px; font-size: 18px; font-weight: 900; cursor: pointer; margin-top: 14px; text-align: center; text-decoration: none; display: none; box-shadow: 0 4px 20px rgba(16, 185, 129, 0.45); text-transform: uppercase; letter-spacing: 0.5px; transition: transform 0.15s, box-shadow 0.15s; }
-            .btn-download:active { transform: scale(0.98); }
-            
-            .btn-clean { width: 100%; background: transparent; color: #a89f91; border: 1px solid #36170e; padding: 12px; border-radius: 12px; font-size: 13px; cursor: pointer; margin-top: 12px; text-align: center; }
-            .btn-clean:hover { color: #f97316; border-color: #ea580c; }
-
-            .status-box { background: #0e0604; border-radius: 10px; padding: 14px; font-family: monospace; font-size: 13px; color: #f97316; text-align: center; border: 1px solid #36170e; }
-            
-            .folder-item { background: #1a0d09; border: 1px solid #36170e; border-radius: 12px; padding: 14px 16px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
-            .folder-name { font-weight: bold; font-size: 15px; color: #ffffff; }
-            .folder-count { background: linear-gradient(135deg, #ea580c 0%, #c2410c 100%); padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: bold; color: #ffffff; }
-
-            .vault-card { background: #140805; border: 1px solid #36170e; border-radius: 14px; padding: 18px; margin-top: 18px; text-align: center; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
-            .vault-title { font-size: 15px; font-weight: bold; color: #fb923c; margin-bottom: 6px; display: flex; align-items: center; justify-content: center; gap: 8px; }
-            .vault-desc { font-size: 13px; color: #a89f91; margin-bottom: 12px; line-height: 1.4; }
-            .btn-vault { background: #240f08; color: #fb923c; border: 1px solid #7c2d12; padding: 12px 20px; border-radius: 10px; font-size: 14px; font-weight: bold; text-decoration: none; display: inline-block; cursor: pointer; transition: 0.2s; }
-            .btn-vault:hover { background: #36150b; border-color: #f97316; }
-        </style>
-    </head>
-    <body>
-        <div class="watermark-01">01</div>
-        <div class="container">
-            <div class="header">
-                <img src="/logo.png" alt="CastilloEnfoca" class="logo-img" onerror="this.style.display='none'">
-                <h1><span class="brand-white">CASTILLO</span><span class="brand-red">ENFOCA</span></h1>
-                <p>Organizador por Dorsal y Nombre</p>
-            </div>
-
-            <div class="card">
-                <div class="upload-box" onclick="document.getElementById('fileInput').click()">
-                    <div class="upload-icon">📸</div>
-                    <div class="upload-text" id="uploadLabel">Toca aquí para seleccionar las fotos</div>
-                    <div class="upload-hint">Puedes seleccionar todas las fotos del partido juntas</div>
-                </div>
-                <input type="file" id="fileInput" multiple accept="image/*" onchange="fotosSeleccionadas(event)">
-                <button id="btnSubir" class="btn-action" onclick="subirFotos()">🚀 Subir y Organizar Fotos</button>
-            </div>
-
-            <div class="card" id="cardEstado" style="display: none;">
-                <div id="statusText" class="status-box">Listo para recibir fotos...</div>
-            </div>
-
-            <div class="card" id="cardCarpetas" style="display: none;">
-                <h3 style="font-size: 15px; color: #f97316; margin-bottom: 14px; font-weight: bold;">📂 Tus Carpetas por Dorsal y Nombre:</h3>
-                <div id="foldersList"></div>
-                
-                <a href="/api/descargar-zip" id="btnDescargar" class="btn-download" onclick="descargarYLimpiar(event)">📦 Descargar Todas las Carpetas en ZIP</a>
-                
-                <button class="btn-clean" onclick="limpiarTodo()">🧹 Limpiar pantalla para el próximo partido</button>
-            </div>
-
-            <div class="vault-card" id="cardBoveda" style="display: none;">
-                <div class="vault-title"><span>🛡️</span> Bóveda de Respaldo en la Nube (Anti-Pérdidas)</div>
-                <p class="vault-desc" id="vaultDesc">¿Borraste una foto por error en tu computadora? Tu copia de seguridad está a salvo en la nube.</p>
-                <div style="display: flex; gap: 10px; justify-content: center; flex-wrap: wrap;">
-                    <a href="/api/descargar-boveda-zip" class="btn-vault" id="btnRestaurar">📦 Restaurar Todo en ZIP</a>
-                    <button class="btn-vault" style="background: #27272a; color: #ffffff; border-color: #52525b;" onclick="abrirRescateIndividual()">🔍 Rescatar Foto Suelta</button>
-                </div>
-                <div id="modalRescate" style="display: none; margin-top: 16px; background: #18181b; border: 1px solid #3f3f46; border-radius: 12px; padding: 14px; text-align: left;">
-                    <h4 style="font-size: 13px; color: #facc15; margin-bottom: 8px;">Selecciona la foto que perdiste para descargarla:</h4>
-                    <div id="listaFotosRescate" style="max-height: 220px; overflow-y: auto;"></div>
-                    <button class="btn-clean" style="margin-top: 8px;" onclick="cerrarRescateIndividual()">Cerrar</button>
-                </div>
-            </div>
-        </div>
-
-        <script>
-            let selectedFiles = [];
-            window.sessionDescargada = false;
-
-            function fotosSeleccionadas(e) {
-                window.sessionDescargada = false;
-                selectedFiles = Array.from(e.target.files);
-                const label = document.getElementById("uploadLabel");
-                const btn = document.getElementById("btnSubir");
-                
-                if (selectedFiles.length > 0) {
-                    label.innerText = `✅ ${selectedFiles.length} fotos seleccionadas`;
-                    btn.style.display = "block";
-                    btn.innerText = `🚀 Subir ${selectedFiles.length} fotos y Organizar`;
-                }
-            }
-
-            async function subirFotos() {
-                if (selectedFiles.length === 0) return;
-                const btn = document.getElementById("btnSubir");
-                const cardEstado = document.getElementById("cardEstado");
-                const status = document.getElementById("statusText");
-                
-                btn.disabled = true;
-                btn.innerText = "⏳ Subiendo fotos...";
-                cardEstado.style.display = "block";
-                status.innerText = `Subiendo ${selectedFiles.length} fotos a la nube...`;
-
-                const formData = new FormData();
-                for (let i = 0; i < selectedFiles.length; i++) {
-                    formData.append("files", selectedFiles[i]);
-                }
-
-                try {
-                    const res = await fetch("/api/subir-y-procesar", {
-                        method: "POST",
-                        body: formData
-                    });
-                    const data = await res.json();
-                    status.innerText = "Fotos subidas. El robot las está agrupando por dorsal y nombre...";
-                    selectedFiles = [];
-                    document.getElementById("uploadLabel").innerText = "Toca aquí para seleccionar fotos";
-                    btn.style.display = "none";
-                    btn.disabled = false;
-                } catch(err) {
-                    status.innerText = "Error: " + err;
-                    btn.disabled = false;
-                }
-            }
-
-            function descargarYLimpiar(e) {
-                if (e) e.preventDefault();
-
-                // 1. Ocultar inmediatamente carpetas e historial de la pantalla
-                window.sessionDescargada = true;
-                const cardCarpetas = document.getElementById("cardCarpetas");
-                const cardEstado = document.getElementById("cardEstado");
-                const foldersList = document.getElementById("foldersList");
-                const btnDescargar = document.getElementById("btnDescargar");
-
-                if (cardCarpetas) cardCarpetas.style.display = "none";
-                if (btnDescargar) btnDescargar.style.display = "none";
-                if (foldersList) foldersList.innerHTML = "";
-
-                if (cardEstado) {
-                    cardEstado.style.display = "block";
-                    document.getElementById("statusText").innerText = "📦 Descargando fotos... Pantalla e historial limpios para el siguiente partido.";
-                }
-
-                // 2. Disparar la descarga del archivo ZIP completo (el servidor limpiará el historial al terminar de enviar)
-                window.location.href = "/api/descargar-zip";
-
-                setTimeout(() => {
-                    if (cardEstado) cardEstado.style.display = "none";
-                    refrescarBoveda();
-                }, 4000);
-            }
-
-            async function limpiarTodo() {
-                if (!confirm("¿Deseas limpiar la pantalla para empezar un nuevo partido?")) return;
-                try {
-                    await fetch("/api/limpiar", { method: "POST" });
-                    window.sessionDescargada = true;
-                    document.getElementById("cardCarpetas").style.display = "none";
-                    document.getElementById("cardEstado").style.display = "none";
-                    document.getElementById("foldersList").innerHTML = "";
-                    document.getElementById("btnDescargar").style.display = "none";
-                    refrescarBoveda();
-                } catch(e) {}
-            }
-
-            async function refrescarCarpetas() {
-                if (window.sessionDescargada) return;
-                try {
-                    const res = await fetch("/api/carpetas");
-                    const data = await res.json();
-                    const list = document.getElementById("foldersList");
-                    const card = document.getElementById("cardCarpetas");
-                    const btnDescargar = document.getElementById("btnDescargar");
-                    
-                    if (data.folders && Object.keys(data.folders).length > 0) {
-                        card.style.display = "block";
-                        btnDescargar.style.display = "block";
-                        list.innerHTML = Object.entries(data.folders).map(([name, files]) => {
-                            const cant = files.length;
-                            const label = cant === 1 ? "1 foto" : `${cant} fotos`;
-                            return `
-                                <div class="folder-item">
-                                    <div class="folder-name">📁 ${name}</div>
-                                    <div class="folder-count">${label}</div>
-                                </div>
-                            `;
-                        }).join("");
-                    } else {
-                        card.style.display = "none";
-                        btnDescargar.style.display = "none";
-                    }
-                } catch(e) {}
-            }
-
-            async function abrirRescateIndividual() {
-                const modal = document.getElementById("modalRescate");
-                const lista = document.getElementById("listaFotosRescate");
-                modal.style.display = "block";
-                lista.innerHTML = "<p style='color:#a1a1aa; font-size:12px;'>Cargando fotos de la bóveda...</p>";
-                try {
-                    const res = await fetch("/api/boveda");
-                    const data = await res.json();
-                    if (data.backup_photos && data.backup_photos.length > 0) {
-                        lista.innerHTML = data.backup_photos.map(f => `
-                            <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; border-bottom: 1px solid #27272a; font-size: 13px;">
-                                <span style="color: #e4e4e7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 210px;">📷 ${f}</span>
-                                <a href="/api/boveda/foto/${f}" download style="background: #ef4444; color: white; padding: 6px 12px; border-radius: 8px; text-decoration: none; font-weight: bold; font-size: 12px;">Descargar</a>
-                            </div>
-                        `).join("");
-                    } else {
-                        lista.innerHTML = "<p style='color:#a1a1aa; font-size:12px;'>No hay fotos respaldadas aún.</p>";
-                    }
-                } catch(e) {
-                    lista.innerHTML = "<p style='color:#ef4444; font-size:12px;'>Error al cargar fotos.</p>";
-                }
-            }
-
-            function cerrarRescateIndividual() {
-                document.getElementById("modalRescate").style.display = "none";
-            }
-
-            async function refrescarBoveda() {
-                try {
-                    const res = await fetch("/api/boveda");
-                    const data = await res.json();
-                    const cardBoveda = document.getElementById("cardBoveda");
-                    const vaultDesc = document.getElementById("vaultDesc");
-                    if (data.count && data.count > 0) {
-                        cardBoveda.style.display = "block";
-                        const textoFotos = data.count === 1 ? "1 foto protegida" : `${data.count} fotos protegidas`;
-                        vaultDesc.innerText = `¿Borraste una foto por error en tu computadora? Tienes ${textoFotos} en la nube listas para recuperar.`;
-                    }
-                } catch(e) {}
-            }
-
-            async function refrescarEstado() {
-                try {
-                    const res = await fetch("/api/estado");
-                    const data = await res.json();
-                    const status = document.getElementById("statusText");
-                    const cardEstado = document.getElementById("cardEstado");
-                    
-                    if (data.is_processing) {
-                        cardEstado.style.display = "block";
-                        status.innerText = `⏳ [${data.processed_photos}/${data.total_photos}] ${data.current_action}`;
-                    } else if (data.logs && data.logs.length > 0) {
-                        status.innerText = "✅ " + data.logs[data.logs.length - 1];
-                    }
-                } catch(e) {}
-            }
-
-            setInterval(refrescarEstado, 2000);
-            setInterval(refrescarCarpetas, 3000);
-            setInterval(refrescarBoveda, 4000);
-            refrescarCarpetas();
-            refrescarBoveda();
-        </script>
-    </body>
-    </html>
-    """
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "pantalla.html"), encoding="utf-8") as f:
+        html = f.read()
     response = HTMLResponse(content=html)
     response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     response.headers["Pragma"] = "no-cache"

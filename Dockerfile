@@ -1,28 +1,40 @@
 FROM python:3.10-slim
 
-# Evitar buffers en logs de Python
 ENV PYTHONUNBUFFERED=1 \
-    DEBIAN_FRONTEND=noninteractive
+    DEBIAN_FRONTEND=noninteractive \
+    MODELS_DIR=/app/models
 
-# Instalar dependencias del sistema necesarias para OpenCV y PyTorch
+# Solo lo necesario para OpenCV headless y descargar los modelos
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    libgl1 \
     libglib2.0-0 \
-    tesseract-ocr \
     curl \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Instalar dependencias de Python
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copiar el código del Agente 1
+# Modelos biometricos oficiales de OpenCV Zoo (Apache-2.0 / MIT, uso comercial permitido).
+# Se verifica la huella SHA-256 de cada archivo: Render usa exactamente lo que se probo.
+RUN mkdir -p /app/models && cd /app/models && \
+    Z=https://github.com/opencv/opencv_zoo/raw/main/models && \
+    curl -fsSL --retry 5 -o object_detection_yolox_2022nov.onnx     $Z/object_detection_yolox/object_detection_yolox_2022nov.onnx && \
+    curl -fsSL --retry 5 -o face_detection_yunet_2023mar.onnx       $Z/face_detection_yunet/face_detection_yunet_2023mar.onnx && \
+    curl -fsSL --retry 5 -o face_recognition_sface_2021dec.onnx     $Z/face_recognition_sface/face_recognition_sface_2021dec.onnx && \
+    curl -fsSL --retry 5 -o text_detection_en_ppocrv3_2023may.onnx  $Z/text_detection_ppocr/text_detection_en_ppocrv3_2023may.onnx && \
+    curl -fsSL --retry 5 -o text_recognition_CRNN_EN_2021sep.onnx   $Z/text_recognition_crnn/text_recognition_CRNN_EN_2021sep.onnx && \
+    printf '%s\n' \
+      "c5c2d13e59ae883e6af3b45daea64af4833a4951c92d116ec270d9ddbe998063  object_detection_yolox_2022nov.onnx" \
+      "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4  face_detection_yunet_2023mar.onnx" \
+      "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79  face_recognition_sface_2021dec.onnx" \
+      "03f550c6b406fda8bf54bd8327815f6c7e2edd98cea02348c93d879254366587  text_detection_en_ppocrv3_2023may.onnx" \
+      "a84b1f6e11a65c2d733cb0cc1f014aae3f99051e3f11447dc282faa678eee544  text_recognition_CRNN_EN_2021sep.onnx" \
+      | sha256sum -c -
+
 COPY . .
 
-# Render asigna el puerto mediante la variable de entorno $PORT (por defecto 10000)
 EXPOSE 10000
 
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-10000}"]
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-10000} --timeout-keep-alive 75"]

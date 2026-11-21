@@ -2,8 +2,7 @@ fastapi>=0.110.0
 uvicorn[standard]>=0.28.0
 boto3>=1.34.0
 python-multipart>=0.0.9
-opencv-python-headless>=4.9.0.80
+# Version fija: es la misma con la que se probo el motor (4.11 trae FaceDetectorYN/FaceRecognizerSF/TextDetectionModel_DB)
+opencv-python-headless==4.11.0.86
 numpy>=1.24.0,<2.0.0
 Pillow>=10.2.0
-requests>=2.31.0
-pytesseract>=0.3.10
