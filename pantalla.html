@@ -159,6 +159,13 @@
          Ejemplo: <i>8 Juan Pérez</i> · <i>Trujillo 6 Luis Rojas</i></p>
       <textarea id="nomina" placeholder="8 Juan Pérez&#10;Trujillo 6 Luis Rojas"></textarea>
     </details>
+    <div style="margin:14px 0 10px;background:#0f1a14;border:1px solid #065f46;border-radius:12px;padding:12px 14px;font-size:13px;line-height:1.45;color:#d1fae5">
+      🔒 <b>Tu privacidad y la de los jugadores</b><br>
+      Las caras se usan solo para ordenar <b>este</b> partido y se borran al terminar. No guardamos huellas faciales ni las compartimos.
+      <label style="display:flex;gap:8px;align-items:flex-start;margin-top:8px;cursor:pointer;color:#fff">
+        <input type="checkbox" id="chkPermiso" style="margin-top:3px;width:18px;height:18px">
+        <span>Tomé estas fotos con permiso del club o de los representantes, y decido yo qué se publica.</span>
+      </label></div>
     <button id="btnSubir" class="btn-action">🚀 Organizar fotos</button>
   </div>
 
@@ -246,6 +253,8 @@ function subirLote(lote, primero) {
 
 async function organizar() {
   if (!seleccion.length) return;
+  if (!$("chkPermiso").checked) { aviso("Marca la casilla de permiso para continuar"); return; }
+  try { localStorage.setItem("permiso_ok", "1"); } catch (e) {}
   const btn = $("btnSubir"); btn.disabled = true; btn.textContent = "⏳ Trabajando...";
   $("cardCarpetas").style.display = "none"; $("cardEstado").style.display = "block";
   const total = seleccion.reduce((s, f) => s + f.size, 0);
@@ -287,6 +296,7 @@ async function organizar() {
   seleccion = [];
 }
 $("btnSubir").addEventListener("click", organizar);
+try { if (localStorage.getItem("permiso_ok") === "1") $("chkPermiso").checked = true; } catch (e) {}
 
 // ---------- progreso del servidor
 function sondear(activar) {
