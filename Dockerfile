@@ -27,7 +27,13 @@ ENV HF_HOME=/app/models/hf \
     FLORENCE_REPO=florence-community/Florence-2-base \
     FLORENCE_REVISION=00921df66db728a9ceb750f5eca43e5c203a2051 \
     FLORENCE_HILOS=2 \
-    MALLOC_ARENA_MAX=2
+    MALLOC_ARENA_MAX=2 \
+    ANALISIS_HILOS=1 \
+    LECTOR_SMOL=0 \
+    SMOL_REPO=HuggingFaceTB/SmolVLM-256M-Instruct \
+    SMOL_REVISION=d039ab0d4b9311b617e8ffec1d06c8464364aeb3
+# Tercer lector: SmolVLM-256M (Apache 2.0). Se le pregunta el numero; acerto 6/6 numeros que nadie leia.
+RUN python -c "from transformers import AutoProcessor, AutoModelForImageTextToText as M; import os; r=os.environ['SMOL_REPO']; v=os.environ['SMOL_REVISION']; AutoProcessor.from_pretrained(r, revision=v); M.from_pretrained(r, revision=v)"
 RUN python -c "from transformers import AutoProcessor, Florence2ForConditionalGeneration as F; import os; r=os.environ['FLORENCE_REPO']; v=os.environ['FLORENCE_REVISION']; AutoProcessor.from_pretrained(r, revision=v); F.from_pretrained(r, revision=v)"
 ENV HF_HUB_OFFLINE=1
 

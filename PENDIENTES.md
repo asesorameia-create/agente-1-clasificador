@@ -3,6 +3,29 @@
 ## >>> DONDE RETOMAR EN LA PROXIMA SESION <<<
 Pídele a Claude: "Lee PENDIENTES.md del agente1-clasificador y continúa desde 'Siguiente paso'."
 
+## >>> RETOMAR AQUI (21 nov 2026, ~08:50, sesion agotada) <<<
+Pídele a Claude: "Lee PENDIENTES.md del agente1-clasificador y continúa desde 'RETOMAR AQUI'."
+
+Publicado ahora (ultimo commit de main):
+- Anticaidas: ANALISIS_HILOS=1 (una foto a la vez), MALLOC_ARENA_MAX=2, malloc_trim, freno >3000 MB.
+- Pantalla: reintenta subidas ~2 min (antes 15 s; se perdieron 13 de 60 fotos en el estres) y /api/procesar.
+- Arreglo: el "2" de Dorsal_08_2 ya no se muestra como equipo.
+- "Ponle número a estas caras" FUNCIONA en vivo (probado: Jugador_07 -> Dorsal_24).
+- SmolVLM (lector_smol.py + _votar_smol en motor) INSTALADO pero APAGADO (LECTOR_SMOL=0 en Dockerfile).
+
+Pasos siguientes, en orden:
+1. Confirmar que Render construyo y quedo "live" (dashboard > Events). /api/diagnostico: memoria_mb.
+2. Medir RAM con Florence + SmolVLM cargados (scratchpad/mem_dos.py). Si pico + 2,7 GB > 3,6 GB:
+   apagar Florence para numeros y dejar CRNN + SmolVLM, o cargar SmolVLM en bfloat16.
+3. Encender SmolVLM (LECTOR_SMOL=1) y repetir estres (scratchpad/estres.py, informe out/estres.html).
+   Meta: 0 caidas, 60/60 fotos aceptadas.
+4. Resultado SmolVLM medido offline (scratchpad/eval_smol.py, out/eval_smol.txt): fotos del cliente
+   carpetas con numero 11 -> 16; leyó bien 4, 8, 6, 10; desacuerdo 4 vs 7 se descarta (bien).
+   FALTA verificar a ojo #14 (TOP05282 persona 2) y #12 (TOP06556 persona 2): out/verif_smol.jpg.
+   Y revisar las 40 fotos "otros" en out/eval_smol.txt.
+5. Prueba de estres 2 (con freno, 2 hilos): 47/60 fotos, 2 caidas OOM durante la subida, 6,6 min de
+   proceso, 0,4 s de respuesta mediana, ZIP 110 MB en 62 s, 0 huellas guardadas, duplicadas ignoradas.
+
 ### Hecho y subido a GitHub (main)
 - 05f12be Florence-2 + votación · f8cfa01 índice de caras en el ZIP (00_INDICE_JUGADORES.jpg + 00_ROSTRO.jpg por carpeta).
 - 59b4880 PRIVACIDAD: las huellas faciales se borran al terminar cada partido (nube y memoria). /api/diagnostico

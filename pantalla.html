@@ -270,16 +270,19 @@ async function organizar() {
     while (true) {
       try { await subirLote(lotes[i], i === 0); break; }
       catch (e) {
-        if (++intentos >= 4) { clearInterval(tic); $("estadoTitulo").textContent = "❌ Se cortó la subida. Revisa tu internet y vuelve a intentar."; btn.disabled = false; btn.textContent = "🔁 Reintentar"; return; }
-        $("estadoDetalle").textContent = `Conexión inestable, reintentando (${intentos}/3)...`;
-        await new Promise(r => setTimeout(r, 2500 * intentos));
+        if (++intentos >= 9) { clearInterval(tic); $("estadoTitulo").textContent = "❌ Se cortó la subida. Revisa tu internet y vuelve a intentar."; btn.disabled = false; btn.textContent = "🔁 Reintentar"; return; }
+        $("estadoDetalle").textContent = `Conexión inestable, reintentando (${intentos}/8)... ninguna foto se pierde`;
+        await new Promise(r => setTimeout(r, Math.min(5000 * intentos, 20000)));   // ~2 min: lo que tarda el servidor en volver
       }
     }
     clearInterval(tic);
     enviados += lotes[i].reduce((s, f) => s + f.size, 0); fotosEnviadas += lotes[i].length;
   }
   const fd = new FormData(); fd.append("nomina", $("nomina").value || "");
-  await fetch("/api/procesar", { method: "POST", body: fd });
+  for (let k = 0; k < 8; k++) {   // si el servidor se esta reiniciando, se insiste hasta que responda
+    try { const r = await fetch("/api/procesar", { method: "POST", body: fd }); if (r.ok) break; } catch (e) {}
+    await new Promise(r => setTimeout(r, 10000));
+  }
   $("cardSubir").style.display = "none";
   seleccion = [];
 }
@@ -358,7 +361,8 @@ function partes(nombre, info) {
   const m = /^Dorsal_(\d+)_(.+)$/.exec(nombre);
   let dorsal = info.dorsal || (m ? String(+m[1]) : "");
   let equipo = info.equipo || "", nom = info.nombre || "";
-  if (!equipo) { const mm = /^(?:Dorsal_\d+|Jugador_\d+)_(.+)$/.exec(nombre); equipo = mm ? mm[1] : ""; }
+  // "_2", "_3" al final solo distinguen dos jugadores con el mismo numero: no es un equipo
+  if (!equipo) { const mm = /^(?:Dorsal_\d+|Jugador_\d+)_(.+?)(?:_\d+)?$/.exec(nombre); equipo = mm && !/^\d+$/.test(mm[1]) ? mm[1] : ""; }
   return { dorsal, equipo: equipo.replace(/_/g, " "), nombre: String(nom).replace(/_/g, " ") };
 }
 

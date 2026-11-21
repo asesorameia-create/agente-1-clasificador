@@ -442,6 +442,56 @@ def _votar_florence(jugadores: List[Dict[str, Any]], torsos: List[np.ndarray]) -
                 x.pop("firma_numero", None)
 
 
+SMOL_MAX_PERSONAS = int(os.getenv("SMOL_MAX_PERSONAS", "3"))
+SMOL_FUERTE_SI, SMOL_FUERTE_CONF = 0.90, 0.95   # solo con esta seguridad SmolVLM nombra la carpeta sin otro voto
+
+
+def _votar_smol(jugadores: List[Dict[str, Any]], torsos: List[np.ndarray]) -> None:
+    """Tercer voto: SmolVLM (se le pregunta el numero). Lee los numeros grandes decorados que los lectores
+    de texto no ven. Coincide con otro lector -> seguro; solo y muy seguro -> seguro; si no, sugerencia."""
+    try:
+        import lector_smol
+    except Exception:
+        return
+    if not lector_smol.disponible():
+        return
+    for i, j in enumerate(jugadores[:SMOL_MAX_PERSONAS]):
+        if i >= len(torsos) or j["altura"] < FLORENCE_ALTURA_MIN:
+            continue
+        local, conf = j.get("dorsal"), j.get("conf_dorsal", 0.0)
+        if local and conf >= 0.97:
+            continue
+        r = lector_smol.leer(torsos[i])
+        if not r or not r["numero"]:
+            continue
+        n = r["numero"]
+        j["lectura_smol"] = n
+        debiles = [x for x in (j.get("lecturas_debiles") or []) if x]
+        if local == n or n in debiles:
+            j["dorsal"], j["conf_dorsal"], j["fuente_dorsal"] = n, 0.99, "votacion"     # 2 lectores coinciden
+            j["alto_dorsal"] = max(j.get("alto_dorsal", 0.0), 0.09)
+        elif local:
+            j["lecturas_debiles"] = [local, n]                                          # desacuerdo: nadie
+            j["dorsal"], j["conf_dorsal"] = None, 0.0
+            j.pop("firma_numero", None)
+        elif r["si"] >= SMOL_FUERTE_SI and r["conf"] >= SMOL_FUERTE_CONF:
+            j["dorsal"], j["conf_dorsal"], j["fuente_dorsal"] = n, 0.97, "smol"
+            j["alto_dorsal"] = max(j.get("alto_dorsal", 0.0), 0.09)
+        else:
+            j["lecturas_debiles"] = debiles + [n]
+    por_num: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for j in jugadores:
+        if j.get("dorsal"):
+            por_num[j["dorsal"]].append(j)
+    for js in por_num.values():
+        if len(js) > 1:
+            js.sort(key=lambda x: -x.get("conf_dorsal", 0.0))
+            for x in js[1:]:
+                x["lecturas_debiles"] = [x["dorsal"]]
+                x["dorsal"], x["conf_dorsal"] = None, 0.0
+                x.pop("firma_numero", None)
+
+
 def _fusionar_vision(jugadores: List[Dict[str, Any]], torsos: List[np.ndarray]) -> None:
     """Combina el lector local con la lectura de Claude (si esta disponible) sobre los protagonistas."""
     try:
@@ -499,6 +549,7 @@ def analizar_foto(img_bytes: bytes, nombre: str = "") -> Dict[str, Any]:
         gray_full = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         ganancias = _ganancias_blanco(img)
         caras_usadas = set()
+        torsos_smol: List[np.ndarray] = []
         torsos_vision: List[np.ndarray] = []   # solo del cuello hacia abajo: las caras no salen del servidor
         for n_p, (x1, y1, x2, y2, sc) in enumerate(relevantes):
             ph, pw = y2 - y1, x2 - x1
@@ -626,8 +677,11 @@ def analizar_foto(img_bytes: bytes, nombre: str = "") -> Dict[str, Any]:
             top = int(fbox[1] + 1.15 * fbox[3]) if fbox is not None else y1 + int(0.18 * ph)
             top = max(y1, min(top, y1 + int(0.4 * ph)))
             torsos_vision.append(img[top:max(top + 1, y2 - int(0.08 * ph)), max(0, x1 - pad):min(W, x2 + pad)].copy())
+            # pecho/espalda sin cabeza para SmolVLM (el recorte medido: 12 %-55 % de la altura de la persona)
+            torsos_smol.append(img[y1 + int(0.12 * ph):y1 + int(0.55 * ph), x1:x2].copy())
             res["jugadores"].append(jug)
         _votar_florence(res["jugadores"], torsos_vision)
+        _votar_smol(res["jugadores"], torsos_smol)
         _fusionar_vision(res["jugadores"], torsos_vision)
         # un mismo numero fisico no puede pertenecer a dos personas solapadas de la foto
         js = [j for j in res["jugadores"] if j.get("_num_xy")]
