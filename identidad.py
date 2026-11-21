@@ -45,6 +45,7 @@ RAFAGA_SEG = 2.0
 DIST_CAMISETA_NUMERO = 0.35 # mismo numero + camiseta parecida = mismo jugador (si no coincide nada mas)
 DIST_FIRMA_DISTINTA = 25.0  # cifra claramente de otro color (Delta E): mismo numero, otra camiseta
 SIM_CARAS_DISTINTAS = 0.30  # por debajo, dos rostros son de personas distintas (SFace)
+PARECIDO_CARA_MIN = 0.20    # medido: brazo tatuado 0.17, cara tapada 0.12, caras reales 0.237+
 NITIDEZ_SUELTO = 55.0       # medido: caras desenfocadas de fondo 15-47, nitidas 81+
 CARA_SUELTO = 0.40          # calidad minima de cara para dar carpeta a quien sale una sola vez
 DIST_EQUIPO_GRUPO = 0.40    # camisetas del mismo equipo dentro del partido
@@ -68,6 +69,10 @@ def _es_protagonista(x, analisis) -> bool:
     fi, _, j = x[0], x[1], x[2]
     if j["huella"] is None or j.get("calidad_cara", 0) < CARA_PROTAGONISTA or j["altura"] < ALTURA_PROTAGONISTA:
         return False
+    if j.get("nitidez", NITIDEZ_SUELTO) < NITIDEZ_SUELTO:
+        return False      # cara desenfocada: el fotografo no la reconoce ni la vende (auditoria: 3 casos)
+    if j.get("parecido_cara", 1.0) < PARECIDO_CARA_MIN:
+        return False      # no es una cara (auditoria: un brazo tatuado recibio carpeta)
     alturas = sorted((o["altura"] for o in analisis[fi].get("jugadores", [])), reverse=True)
     return j["altura"] >= 0.6 * alturas[0] and (len(alturas) < 3 or j["altura"] >= alturas[1] * 0.999)
 
@@ -336,6 +341,15 @@ def clasificar_lote(analisis: List[Dict[str, Any]], nomina: str = "") -> Dict[st
     Devuelve {"carpetas": {carpeta: [keys]}, "miniaturas": {carpeta: bytes}, "resumen": {...}, "detalle": {...}}
     """
     inst = [(fi, ji, j) for fi, a in enumerate(analisis) for ji, j in enumerate(a.get("jugadores", []))]
+    # "parecido a una cara": la huella de una cara real se parece a la cara media del partido; un brazo
+    # tatuado no (medido: tatuaje 0.17, caras reales 0.237+). Solo decide si alguien de UNA foto merece carpeta.
+    todas_h = [x[2]["huella"] for x in inst if x[2]["huella"] is not None]
+    if len(todas_h) >= 8:
+        media = np.mean(np.array(todas_h), axis=0)
+        media /= max(1e-6, float(np.linalg.norm(media)))
+        for x in inst:
+            if x[2]["huella"] is not None:
+                x[2]["parecido_cara"] = float(np.dot(x[2]["huella"], media))
     G = _Grupos(inst)
 
     # ---------------- 1. evidencia fuerte: mismo dorsal + camiseta parecida
@@ -448,7 +462,8 @@ def clasificar_lote(analisis: List[Dict[str, Any]], nomina: str = "") -> Dict[st
                 # mas abajo se descarta si su camiseta no es de ningun equipo del partido (publico, tecnicos)
                 cand = [i for i in miembros if inst[i][2]["huella"] is not None
                         and inst[i][2].get("calidad_cara", 0) >= CARA_SUELTO
-                        and inst[i][2].get("nitidez", NITIDEZ_SUELTO) >= NITIDEZ_SUELTO]   # caras de fondo desenfocadas: Generales
+                        and inst[i][2].get("nitidez", NITIDEZ_SUELTO) >= NITIDEZ_SUELTO     # caras de fondo desenfocadas: Generales
+                        and inst[i][2].get("parecido_cara", 1.0) >= PARECIDO_CARA_MIN]   # no es una cara: Generales
                 if not cand:
                     continue
                 suelto = True

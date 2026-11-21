@@ -183,7 +183,26 @@ def _detectar_personas(m, img: np.ndarray) -> List[Tuple[int, int, int, int, flo
         x2, y2 = min(w, int(x + ww)), min(h, int(y + hh))
         if x2 - x1 > 8 and y2 - y1 > 16:
             res.append((x1, y1, x2, y2, float(score[i])))
-    return res
+    return _sin_duplicados(res)
+
+
+def _sin_duplicados(cajas):
+    """Un recuadro casi entero dentro de otro de tamano parecido es la MISMA persona detectada dos veces
+    (medido en vivo: el #10 rojo salio en dos carpetas desde la misma foto). Se queda el mas grande."""
+    cajas = sorted(cajas, key=lambda c: -(c[2] - c[0]) * (c[3] - c[1]))
+    quedan = []
+    for c in cajas:
+        dup = False
+        for g in quedan:
+            ix = max(0, min(c[2], g[2]) - max(c[0], g[0]))
+            iy = max(0, min(c[3], g[3]) - max(c[1], g[1]))
+            area_c = max(1, (c[2] - c[0]) * (c[3] - c[1]))
+            if ix * iy / area_c >= 0.85 and (c[3] - c[1]) >= 0.6 * (g[3] - g[1]):
+                dup = True
+                break
+        if not dup:
+            quedan.append(c)
+    return quedan
 
 
 def _detectar_caras(m, img: np.ndarray):

@@ -138,3 +138,9 @@ Pasos siguientes, en orden:
 - PENDIENTE: /api/boveda devuelve la lista completa de la bóveda en cada carga de página (crece sin límite).
 - PENDIENTE: recargas repetidas de la página generan carga (cachear /api/carpetas unos segundos).
 - PENDIENTE IMPORTANTE: una sola sesión compartida; dos personas a la vez se pisan el partido.
+
+## REGLA PERMANENTE (21 nov 2026)
+- Antes de CADA publicación: `python pruebas/correr_todo.py` (con MODELS_DIR apuntando a los modelos). Si falla, NO publicar.
+- Cada fallo real encontrado en una auditoría se agrega como prueba en pruebas/ (R5/15, una cifra, duplicados,
+  grupo completo, espectador). Después de publicar: prueba como el fotógrafo en Render + ZIP + auditoría visual
+  de TODAS las carpetas (scratchpad/auditar_zip.py).
