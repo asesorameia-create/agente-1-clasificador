@@ -29,7 +29,9 @@ ENV HF_HOME=/app/models/hf \
     FLORENCE_HILOS=2 \
     MALLOC_ARENA_MAX=2 \
     ANALISIS_HILOS=1 \
-    LECTOR_SMOL=0 \
+    LECTOR_SMOL=1 \
+    SMOL_MAX_PERSONAS=4 \
+    TRABAJADOR_LIMITE_MB=3400 \
     SMOL_REPO=HuggingFaceTB/SmolVLM-256M-Instruct \
     SMOL_REVISION=d039ab0d4b9311b617e8ffec1d06c8464364aeb3
 # Tercer lector: SmolVLM-256M (Apache 2.0). Se le pregunta el numero; acerto 6/6 numeros que nadie leia.
