@@ -364,6 +364,17 @@ def _nombre_color(h: np.ndarray) -> str:
     return a + (b if b else "")
 
 
+def _nitidez(jpg: bytes) -> float:
+    """Nitidez de la cara (varianza del Laplaciano sobre la miniatura a 160 px). Medido en caras reales del
+    cliente: desenfocadas de fondo 15-47, nitidas 81-2085."""
+    try:
+        g = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_GRAYSCALE)
+        g = cv2.resize(g, (160, 160), interpolation=cv2.INTER_AREA)
+        return float(cv2.Laplacian(g, cv2.CV_64F).var())
+    except Exception:
+        return 0.0
+
+
 def _miniatura(img: np.ndarray, x1, y1, x2, y2, lado=160) -> bytes:
     h, w = img.shape[:2]
     cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
@@ -518,8 +529,9 @@ def _jurado(jugadores: List[Dict[str, Any]], torsos_vision: List[np.ndarray], to
         if j["altura"] < FLORENCE_ALTURA_MIN:
             continue
         local, conf = j.get("dorsal"), j.get("conf_dorsal", 0.0)
-        if local and conf >= 0.97:
-            continue                                        # el lector rapido esta seguro
+        if local and conf >= 0.97 and len(local) == 2:
+            continue                                        # dos cifras leidas con seguridad: no hace falta jurado
+        # UNA cifra siempre va a votacion: es la que mas se confunde (logo "R5" -> 5, un "15" tapado -> 5)
         votos: List[str] = [local] if local else []
         smol = None
         if hay_smol and i < len(torsos_smol):
@@ -546,7 +558,7 @@ def _jurado(jugadores: List[Dict[str, Any]], torsos_vision: List[np.ndarray], to
         if n >= 2:
             j["dorsal"], j["conf_dorsal"], j["fuente_dorsal"] = gana, 0.99, "votacion"
             j["alto_dorsal"] = max(j.get("alto_dorsal", 0.0), 0.09)
-        elif smol and not local and flor in (None, smol["numero"])                 and smol["si"] >= SMOL_FUERTE_SI and smol["conf"] >= SMOL_FUERTE_CONF:
+        elif smol and not local and flor in (None, smol["numero"]) and len(smol["numero"]) == 2                 and smol["si"] >= SMOL_FUERTE_SI and smol["conf"] >= SMOL_FUERTE_CONF:
             j["dorsal"], j["conf_dorsal"], j["fuente_dorsal"] = smol["numero"], 0.97, "smol"
             j["alto_dorsal"] = max(j.get("alto_dorsal", 0.0), 0.09)
         elif votos:
@@ -661,6 +673,7 @@ def analizar_foto(img_bytes: bytes, nombre: str = "") -> Dict[str, Any]:
                         fx, fy, fw, fh = f[0] / s_c, f[1] / s_c, f[2] / s_c, f[3] / s_c
                         jug["mini"] = _miniatura(img, fx, fy, fx + fw, fy + fh)
                         jug["mini_cara"] = True
+                        jug["nitidez"] = _nitidez(jug["mini"])
                     except cv2.error:
                         pass
 

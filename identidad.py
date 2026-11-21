@@ -42,8 +42,10 @@ DIST_MISMA_FOTO = 0.35      # companero de la misma foto (misma luz): basta una 
 RAFAGA_SEG = 2.0
 
 # Medidor de certeza: solo lo que supera estos umbrales entra solo a la carpeta; lo demas se pregunta.
+DIST_CAMISETA_NUMERO = 0.35 # mismo numero + camiseta parecida = mismo jugador (si no coincide nada mas)
 DIST_FIRMA_DISTINTA = 25.0  # cifra claramente de otro color (Delta E): mismo numero, otra camiseta
 SIM_CARAS_DISTINTAS = 0.30  # por debajo, dos rostros son de personas distintas (SFace)
+NITIDEZ_SUELTO = 55.0       # medido: caras desenfocadas de fondo 15-47, nitidas 81+
 CARA_SUELTO = 0.40          # calidad minima de cara para dar carpeta a quien sale una sola vez
 DIST_EQUIPO_GRUPO = 0.40    # camisetas del mismo equipo dentro del partido
 OTROS = "Otros_jugadores"    # arqueros, sueltos y equipos con menos de 3 jugadores: una sola carpeta
@@ -353,8 +355,17 @@ def clasificar_lote(analisis: List[Dict[str, Any]], nomina: str = "") -> Dict[st
                 continue                                    # equipos escritos distintos
             ra, rb = G.raiz(a), G.raiz(b)
             ha, hb = G.huellas[ra], G.huellas[rb]
-            if ha and hb and float((np.array(ha) @ np.array(hb).T).max()) < SIM_CARAS_DISTINTAS:
-                continue                                    # el rostro dice que son dos personas
+            sim = float((np.array(ha) @ np.array(hb).T).max()) if ha and hb else None
+            if sim is not None and sim < SIM_UNIR_A_DORSAL:
+                continue                                    # las dos caras se ven y no se parecen: dos personas
+                                                            # (auditoria en vivo: 3 mezclas de 12 por numeros iguales)
+            # el numero solo NO basta: tiene que coincidir algo mas (cara, color de la cifra o camiseta).
+            # Medido en vivo: un logo "R5" y un "15" tapado dieron dos "5" falsos y mezclaron a dos personas.
+            misma_cifra = dn <= DIST_FIRMA_NUMERO
+            misma_cara = sim is not None and sim >= SIM_UNIR_A_DORSAL
+            misma_camiseta = _dist_color(ja["color"], jb["color"]) <= DIST_CAMISETA_NUMERO
+            if not (misma_cifra or misma_cara or misma_camiseta):
+                continue
             G.unir(a, b)                                    # (unir() ademas bloquea: misma foto, camiseta muy distinta)
 
     # ---------------- 2. biometria facial: pares de mayor a menor similitud
@@ -436,7 +447,8 @@ def clasificar_lote(analisis: List[Dict[str, Any]], nomina: str = "") -> Dict[st
                 # NADIE FUERA: con cara visible tambien recibe carpeta (fotos de grupo, segundo plano);
                 # mas abajo se descarta si su camiseta no es de ningun equipo del partido (publico, tecnicos)
                 cand = [i for i in miembros if inst[i][2]["huella"] is not None
-                        and inst[i][2].get("calidad_cara", 0) >= CARA_SUELTO]
+                        and inst[i][2].get("calidad_cara", 0) >= CARA_SUELTO
+                        and inst[i][2].get("nitidez", NITIDEZ_SUELTO) >= NITIDEZ_SUELTO]   # caras de fondo desenfocadas: Generales
                 if not cand:
                     continue
                 suelto = True
@@ -598,8 +610,9 @@ def clasificar_lote(analisis: List[Dict[str, Any]], nomina: str = "") -> Dict[st
             n_anon[eq] += 1
             c = f"Jugador_{n_anon[eq]:02d}{eq}"
         base, k = c, 2
-        if c in usadas and P.get("grupo") and not P["equipo"]:
-            c = f"{base}_{limpiar_nombre(P['grupo'])}"      # dos #8 de equipos distintos: lo dice el nombre
+        g_ = P.get("grupo") or ""
+        if c in usadas and g_ and g_ != OTROS and not P["equipo"] and limpiar_nombre(g_) not in base:
+            c = f"{base}_{limpiar_nombre(g_)}"             # dos #8 de equipos distintos: lo dice el nombre
         while c in usadas:
             c = f"{base}_{k}"
             k += 1
