@@ -493,6 +493,80 @@ def _votar_smol(jugadores: List[Dict[str, Any]], torsos: List[np.ndarray]) -> No
                 x.pop("firma_numero", None)
 
 
+JURADO_MAX_PERSONAS = int(os.getenv("JURADO_MAX_PERSONAS", "4"))
+
+
+def _jurado(jugadores: List[Dict[str, Any]], torsos_vision: List[np.ndarray], torsos_smol: List[np.ndarray]) -> None:
+    """JURADO ESCALONADO de lectores de dorsal (cada uno mira la foto a su manera):
+      1) siempre: lector rapido (CRNN, ya leyo) + SmolVLM (se le PREGUNTA el numero);
+      2) si coinciden -> numero confirmado, no se molesta al tercero;
+      3) si discrepan o solo uno vio numero -> Florence-2 desempata: gana la mayoria (2 de 3);
+      4) sin mayoria -> no se nombra (queda como sugerencia). Nunca se inventa.
+    El lector lento solo trabaja cuando hay desacuerdo: varios puntos de vista sin perder velocidad."""
+    try:
+        import lector_smol
+        hay_smol = lector_smol.disponible()
+    except Exception:
+        hay_smol = False
+    try:
+        import lector_florence
+        import identidad
+        hay_florence = lector_florence.disponible()
+    except Exception:
+        hay_florence = False
+    for i, j in enumerate(jugadores[:JURADO_MAX_PERSONAS]):
+        if j["altura"] < FLORENCE_ALTURA_MIN:
+            continue
+        local, conf = j.get("dorsal"), j.get("conf_dorsal", 0.0)
+        if local and conf >= 0.97:
+            continue                                        # el lector rapido esta seguro
+        votos: List[str] = [local] if local else []
+        smol = None
+        if hay_smol and i < len(torsos_smol):
+            r = lector_smol.leer(torsos_smol[i])
+            if r and r["numero"]:
+                smol = r
+                votos.append(r["numero"])
+                j["lectura_smol"] = r["numero"]
+        flor = None
+        necesita_juez = len(votos) == 1 or (len(votos) == 2 and votos[0] != votos[1])
+        if necesita_juez and hay_florence and i < len(torsos_vision):
+            r = lector_florence.leer(torsos_vision[i])
+            if r is not None:
+                j["texto_florence"] = r["texto"][:80]
+                equipos = identidad.equipos_en_texto(r["texto"])
+                if len(equipos) == 1:
+                    j["equipo_vision"] = next(iter(equipos))
+                nums = list(dict.fromkeys(r["numeros"]))
+                if len(nums) == 1 and len(equipos) <= 1:   # dos numeros/equipos en el recorte: se colo otro
+                    flor = nums[0]
+                    votos.append(flor)
+        cuenta = Counter(votos)
+        gana, n = cuenta.most_common(1)[0] if cuenta else (None, 0)
+        if n >= 2:
+            j["dorsal"], j["conf_dorsal"], j["fuente_dorsal"] = gana, 0.99, "votacion"
+            j["alto_dorsal"] = max(j.get("alto_dorsal", 0.0), 0.09)
+        elif smol and not local and flor in (None, smol["numero"])                 and smol["si"] >= SMOL_FUERTE_SI and smol["conf"] >= SMOL_FUERTE_CONF:
+            j["dorsal"], j["conf_dorsal"], j["fuente_dorsal"] = smol["numero"], 0.97, "smol"
+            j["alto_dorsal"] = max(j.get("alto_dorsal", 0.0), 0.09)
+        elif votos:
+            j["lecturas_debiles"] = list(dict.fromkeys(votos))
+            j["dorsal"], j["conf_dorsal"] = None, 0.0
+            j.pop("firma_numero", None)
+    # un mismo numero no puede ser de dos jugadores de la misma foto: se queda el de mas votos
+    por_num: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for j in jugadores:
+        if j.get("dorsal"):
+            por_num[j["dorsal"]].append(j)
+    for js in por_num.values():
+        if len(js) > 1:
+            js.sort(key=lambda x: -x.get("conf_dorsal", 0.0))
+            for x in js[1:]:
+                x["lecturas_debiles"] = [x["dorsal"]]
+                x["dorsal"], x["conf_dorsal"] = None, 0.0
+                x.pop("firma_numero", None)
+
+
 def _fusionar_vision(jugadores: List[Dict[str, Any]], torsos: List[np.ndarray]) -> None:
     """Combina el lector local con la lectura de Claude (si esta disponible) sobre los protagonistas."""
     try:
@@ -683,8 +757,7 @@ def analizar_foto(img_bytes: bytes, nombre: str = "") -> Dict[str, Any]:
             # pecho/espalda sin cabeza para SmolVLM (el recorte medido: 12 %-55 % de la altura de la persona)
             torsos_smol.append(img[y1 + int(0.12 * ph):y1 + int(0.55 * ph), x1:x2].copy())
             res["jugadores"].append(jug)
-        _votar_florence(res["jugadores"], torsos_vision)
-        _votar_smol(res["jugadores"], torsos_smol)
+        _jurado(res["jugadores"], torsos_vision, torsos_smol)
         _fusionar_vision(res["jugadores"], torsos_vision)
         # un mismo numero fisico no puede pertenecer a dos personas solapadas de la foto
         js = [j for j in res["jugadores"] if j.get("_num_xy")]

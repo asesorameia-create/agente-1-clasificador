@@ -17,6 +17,7 @@ import time
 import uuid
 import pickle
 import zipfile
+import hashlib
 from collections import defaultdict
 import logging
 import tempfile
@@ -558,6 +559,7 @@ async def confirmar_duda(request: Request):
 
 
 _cache_vistas: Dict[str, bytes] = {}
+_contenidos_sesion: Dict[str, set] = {}     # huellas de archivo (sha1) ya recibidas en cada partido
 
 
 @app.get("/api/vista/{carpeta}/{archivo}")
@@ -796,6 +798,12 @@ async def upload_and_process(background_tasks: BackgroundTasks, files: List[Uplo
         nombre = _nombre_seguro(file.filename)
 
         def guardar(nombre=nombre, datos=datos):
+            # la MISMA foto con otro nombre ("DSC_3079 (1).jpg", reenviada por WhatsApp...): se reconoce por su contenido
+            huella = hashlib.sha1(datos).hexdigest()
+            vistas = _contenidos_sesion.setdefault(sid, set())
+            if huella in vistas:
+                return None
+            vistas.add(huella)
             key = nombre
             if ALMACEN.existe(key):
                 b, e = os.path.splitext(nombre)

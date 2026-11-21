@@ -217,13 +217,24 @@ const LOTE_ARCHIVOS = 6, LOTE_BYTES = 24 * 1024 * 1024;
 let seleccion = [];
 let sondeo = null;
 
-function aviso(txt, ms = 3500) { const a = $("aviso"); a.textContent = txt; a.style.display = "block"; clearTimeout(a._t); a._t = setTimeout(() => a.style.display = "none", ms); }
+function aviso(txt, ms = 3500) {
+  const a = $("aviso"); a.textContent = txt; a.style.display = "block";
+  // las advertencias se ven en naranja; solo lo que salio bien va en verde
+  const mal = /^(⚠️|❌)|Marca |Espera|No se|Escribe/.test(txt);
+  a.style.background = mal ? "#3a1a05" : ""; a.style.borderColor = mal ? "#f97316" : "";
+  clearTimeout(a._t); a._t = setTimeout(() => a.style.display = "none", ms);
+}
 function mb(b) { return (b / 1048576).toFixed(b > 1e9 ? 0 : 1) + " MB"; }
 function tiempo(s) { if (s == null) return ""; s = Math.max(0, Math.round(s)); const m = Math.floor(s / 60); return m ? `${m} min ${s % 60} s` : `${s} s`; }
 
 // ---------- seleccion de fotos (clic o arrastrar)
 function elegir(files) {
-  seleccion = Array.from(files).filter(f => /\.(jpe?g|png|webp)$/i.test(f.name) || /^image\/(jpeg|png|webp)$/.test(f.type));
+  const todos = Array.from(files);
+  seleccion = todos.filter(f => /\.(jpe?g|png|webp)$/i.test(f.name) || /^image\/(jpeg|png|webp)$/.test(f.type));
+  const fuera = todos.filter(f => !seleccion.includes(f));
+  const heic = fuera.filter(f => /\.(heic|heif)$/i.test(f.name) || /hei[cf]/i.test(f.type)).length;
+  if (fuera.length) aviso(`⚠️ ${fuera.length} ${fuera.length === 1 ? "archivo no es" : "archivos no son"} foto JPG/PNG y no se ${fuera.length === 1 ? "subirá" : "subirán"}` +
+    (heic ? `. ${heic} ${heic === 1 ? "es" : "son"} de iPhone (HEIC): en el iPhone, Ajustes › Cámara › Formatos › «Más compatible».` : "."), 9000);
   const btn = $("btnSubir");
   if (!seleccion.length) { $("uploadLabel").textContent = "No encontré fotos JPG/PNG en lo que elegiste"; btn.style.display = "none"; return; }
   const total = seleccion.reduce((s, f) => s + f.size, 0);
