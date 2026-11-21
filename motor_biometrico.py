@@ -58,7 +58,7 @@ for _k in [k for k in os.getenv("MODELOS_LIGEROS_LISTA", "yolox,sface,crnn").spl
 
 # ---------------------------------------------------------------- parametros
 LADO_TRABAJO = 2000          # lado mayor de la imagen de trabajo (memoria ~9 MB)
-LADO_CARAS = 1280            # lado mayor para buscar caras
+LADO_CARAS = int(os.getenv("LADO_CARAS", "2000"))   # caras de foto de grupo: a 1280 quedaban de ~40 px            # lado mayor para buscar caras
 PERSONA_MIN_SCORE = 0.45
 PERSONA_MIN_ALTURA = 0.16    # fraccion de la altura de la foto para considerar a un jugador
 MAX_PERSONAS = int(os.getenv("MAX_PERSONAS", "16"))   # fotos de grupo: nadie se queda fuera
@@ -652,6 +652,24 @@ def analizar_foto(img_bytes: bytes, nombre: str = "") -> Dict[str, Any]:
         alt_max = (personas[0][3] - personas[0][1]) if personas else 0
         relevantes = [p for p in personas if (p[3] - p[1]) >= PERSONA_MIN_ALTURA * H or (p[3] - p[1]) >= 0.6 * alt_max][:MAX_PERSONAS]
 
+        # Cada cara va a la persona cuya CABEZA (arriba al centro del recuadro) esta mas cerca. Antes se repartian
+        # por tamano de recuadro: en una foto de grupo el que saltaba se quedaba con la cara del de al lado
+        # (auditoria: el jugador del centro de DSC_3079 quedo sin cara ni carpeta).
+        pares_c = []
+        for pi, (px1, py1, px2, py2, _) in enumerate(relevantes):
+            pph, ppw = py2 - py1, px2 - px1
+            for ci, f in enumerate(caras):
+                fx, fy, fw, fh = f[0] / s_c, f[1] / s_c, f[2] / s_c, f[3] / s_c
+                cxf, cyf = fx + fw / 2, fy + fh / 2
+                if px1 <= cxf <= px2 and py1 - 0.05 * pph <= cyf <= py1 + 0.38 * pph:
+                    d = abs(cxf - (px1 + px2) / 2) / max(1, ppw) + abs(cyf - (py1 + 0.1 * pph)) / max(1, pph)
+                    pares_c.append((d, pi, ci))
+        cara_de: Dict[int, int] = {}
+        usadas_c: set = set()
+        for d, pi, ci in sorted(pares_c):
+            if pi not in cara_de and ci not in usadas_c:
+                cara_de[pi] = ci
+                usadas_c.add(ci)
         gray_full = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         ganancias = _ganancias_blanco(img)
         caras_usadas = set()
@@ -665,14 +683,7 @@ def analizar_foto(img_bytes: bytes, nombre: str = "") -> Dict[str, Any]:
                 "color": None, "mini": b"", "mini_cara": False,
             }
             # ---- cara dentro de la persona (tercio superior)
-            mejor_c, mejor_a = None, 0
-            for ci, f in enumerate(caras):
-                if ci in caras_usadas:
-                    continue
-                fx, fy, fw, fh = f[0] / s_c, f[1] / s_c, f[2] / s_c, f[3] / s_c
-                cxf, cyf = fx + fw / 2, fy + fh / 2
-                if x1 <= cxf <= x2 and y1 - 0.05 * ph <= cyf <= y1 + 0.38 * ph and fw * fh > mejor_a:
-                    mejor_c, mejor_a = ci, fw * fh
+            mejor_c = cara_de.get(n_p)      # la cara que esta EN SU CABEZA (asignacion por cercania, ver arriba)
             fbox = None
             if mejor_c is not None:
                 f = caras[mejor_c]
