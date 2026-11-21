@@ -23,6 +23,9 @@ Pasos siguientes, en orden:
    carpetas con numero 11 -> 16; leyó bien 4, 8, 6, 10; desacuerdo 4 vs 7 se descarta (bien).
    FALTA verificar a ojo #14 (TOP05282 persona 2) y #12 (TOP06556 persona 2): out/verif_smol.jpg.
    Y revisar las 40 fotos "otros" en out/eval_smol.txt.
+4b. MEDIDO al cierre: RAM con modelos OpenCV + Florence + SmolVLM = 2,5 GB, pico 2,8 GB (PC local).
+   40 fotos "otros": carpetas con numero 10 -> 20 con SmolVLM (falta revisar a ojo las 10 nuevas:
+   02, 07, 08, 08_2, 10_3, 11, 13, 14, 24, 55) antes de encender LECTOR_SMOL=1.
 5. Prueba de estres 2 (con freno, 2 hilos): 47/60 fotos, 2 caidas OOM durante la subida, 6,6 min de
    proceso, 0,4 s de respuesta mediana, ZIP 110 MB en 62 s, 0 huellas guardadas, duplicadas ignoradas.
 
