@@ -38,6 +38,7 @@ DIST_EQUIPO = 0.30          # mismo dorsal sin firma de numero: camisetas casi i
 DIST_FIRMA_NUMERO = 12.0    # Delta E medio entre colores de cifra/fondo de dos dorsales iguales
 DIST_UNION_COLOR = 0.70     # por encima, dos grupos nunca se unen (ej. camiseta negra vs blanca)
 DIST_HEREDAR_NOMBRE = 0.15  # camiseta casi identica a la de un jugador cuyo equipo se leyo
+DIST_MISMA_FOTO = 0.35      # companero de la misma foto (misma luz): basta una camiseta parecida
 RAFAGA_SEG = 2.0
 
 # Medidor de certeza: solo lo que supera estos umbrales entra solo a la carpeta; lo demas se pregunta.
@@ -164,6 +165,39 @@ def _nombre_equipo(palabras: List[str]) -> Optional[str]:
         if apoyo >= 2:
             return best.capitalize()
     return None
+
+
+def equipos_en_texto(texto: str) -> set:
+    """Equipos conocidos presentes en un texto OCR pegado (ej. 'DEPORTETRUJILLODEPORTE', 'CARABOBO11')."""
+    t = _canon(texto)
+    out = set()
+    for n in NOMBRES_EQUIPO:
+        cn = _canon(n)
+        if len(cn) < 4 or len(t) < 4:
+            continue
+        L = len(cn)
+        if L <= 6:
+            if cn in t:          # nombres cortos (Lara, Apure, Sucre...): solo coincidencia completa
+                out.add(n)
+            continue
+        mejor = max((difflib.SequenceMatcher(None, cn, t[k:k + L]).ratio() for k in range(0, max(1, len(t) - L + 1))),
+                    default=0.0)
+        if mejor >= 0.75:
+            out.add(n)
+    return out
+
+
+def _vistas_distintas(fotos: List[int], analisis: List[Dict[str, Any]]) -> int:
+    """Cuantas fotos REALMENTE distintas: copias o fotos casi identicas cuentan como una sola
+    (una lectura equivocada repetida en una copia no debe 'confirmarse' a si misma)."""
+    unicas: List[int] = []
+    for fi in dict.fromkeys(fotos):
+        fa = analisis[fi].get("firma")
+        if fa is not None and any(analisis[u].get("firma") is not None
+                                  and float(np.minimum(fa, analisis[u]["firma"]).sum()) >= 0.97 for u in unicas):
+            continue
+        unicas.append(fi)
+    return len(unicas)
 
 
 def _equipo_por_vision(nombres: List[str]) -> Optional[str]:
@@ -318,12 +352,14 @@ def clasificar_lote(analisis: List[Dict[str, Any]], nomina: str = "") -> Dict[st
         dorsal = None
         if G.dorsales[r]:
             k, v = G.dorsales[r].most_common(1)[0]
-            vistas = sum(1 for i in miembros if inst[i][2]["dorsal"] == k)
+            vistas = _vistas_distintas([inst[i][0] for i in miembros if inst[i][2]["dorsal"] == k], analisis)
             grande = max((inst[i][2].get("alto_dorsal", 0) for i in miembros if inst[i][2]["dorsal"] == k), default=0)
             con_cara = any(inst[i][2]["huella"] is not None for i in miembros)
             # visto en 2+ fotos, o una sola vez pero claro (numero de espalda/pecho, o con rostro visible)
             por_vision = any(inst[i][2].get("fuente_dorsal") == "vision" and inst[i][2]["dorsal"] == k for i in miembros)
-            if (vistas >= 2 and v >= 2 * 0.86) or (v >= 0.97 and (k != "1" or por_vision)
+            mejor_conf = max(inst[i][2]["conf_dorsal"] for i in miembros if inst[i][2]["dorsal"] == k)
+            # la confianza es la MEJOR lectura individual (nunca la suma: las copias no se confirman a si mismas)
+            if (vistas >= 2 and v >= 2 * 0.86) or (mejor_conf >= 0.97 and (k != "1" or por_vision)
                                                     and (grande >= 0.08 or (con_cara and grande >= 0.05))):
                 dorsal = k
         protagonista_solo = None
@@ -346,7 +382,7 @@ def clasificar_lote(analisis: List[Dict[str, Any]], nomina: str = "") -> Dict[st
                        and not _numero_sospechoso(inst[i][2])}
             if not seguros:   # varias lecturas medianas que coinciden en fotos distintas tambien son prueba
                 lect = [i for i in miembros if inst[i][2]["dorsal"] == dorsal and not _numero_sospechoso(inst[i][2])]
-                if len({inst[i][0] for i in lect}) >= 2:
+                if _vistas_distintas([inst[i][0] for i in lect], analisis) >= 2:
                     seguros = set(lect)
         else:
             caras_g = [i for i in miembros if inst[i][2]["huella"] is not None]
@@ -411,8 +447,14 @@ def clasificar_lote(analisis: List[Dict[str, Any]], nomina: str = "") -> Dict[st
                           "lecturas": {inst[i][2]["dorsal"] for i in miembros if inst[i][2]["dorsal"]},
                           "miembros": set(miembros)})
 
-    # ---------------- 5. equipo: lo leido en la camiseta del jugador; si no, se hereda solo de un
-    #                     companero con camiseta casi identica; si no, el color (nunca un nombre inventado)
+    # ---------------- 5. equipo: lo leido en la camiseta del jugador; si no, se hereda de un companero
+    #                     DE LA MISMA FOTO con la misma camiseta (misma luz, mismo partido); si no, de un
+    #                     jugador con camiseta casi identica; si no, se deja vacio. Nunca un color como nombre.
+    nombres_foto: Dict[int, List[Tuple[np.ndarray, str]]] = defaultdict(list)
+    for fi, ji, j in inst:
+        n = (_equipo_por_vision([j["equipo_vision"]]) if j.get("equipo_vision") else None) or _nombre_equipo(j["palabras"])
+        if n and j["color"] is not None:
+            nombres_foto[fi].append((j["color"], n))
     portadores = []
     for P in jugadores:
         P["equipo"] = _equipo_por_vision(P.get("equipos_v", [])) or _nombre_equipo(P["palabras"])
@@ -423,14 +465,17 @@ def clasificar_lote(analisis: List[Dict[str, Any]], nomina: str = "") -> Dict[st
             continue
         mejor, md = None, 9.0
         if P["color"] is not None:
-            for n, c in portadores:
-                d = _dist_color(P["color"], c)
-                if d < md:
-                    mejor, md = n, d
-        if mejor and md <= DIST_HEREDAR_NOMBRE:
-            P["equipo"] = mejor
-        else:
-            P["equipo"] = _nombre_color(P["color"]) if P["color"] is not None else "Sin_Equipo"
+            for fi in P["fotos"]:                       # 1) companeros de la misma foto
+                for c, n in nombres_foto.get(fi, []):
+                    d = _dist_color(P["color"], c)
+                    if d <= DIST_MISMA_FOTO and d < md:
+                        mejor, md = n, d
+            if mejor is None:                          # 2) camiseta casi identica en otra foto
+                for n, c in portadores:
+                    d = _dist_color(P["color"], c)
+                    if d <= DIST_HEREDAR_NOMBRE and d < md:
+                        mejor, md = n, d
+        P["equipo"] = mejor or ""
 
     # ---------------- 6. nombres de carpeta (unicos), con nomina opcional
     nom = parsear_nomina(nomina)
@@ -454,12 +499,13 @@ def clasificar_lote(analisis: List[Dict[str, Any]], nomina: str = "") -> Dict[st
     dudas_salida: List[Dict[str, Any]] = []
     for P in sorted(jugadores, key=lambda x: (x["equipo"], x["dorsal"] is None, int(x["dorsal"] or 0), -x["n"])):
         nombre = None
+        eq = f"_{limpiar_nombre(P['equipo'])}" if P["equipo"] else ""    # sin equipo leido: sin sufijo
         if P["dorsal"]:
             nombre = nombre_de(P["equipo"], P["dorsal"])
-            c = f"Dorsal_{int(P['dorsal']):02d}_{limpiar_nombre(P['equipo'])}" + (f"_{limpiar_nombre(nombre)}" if nombre else "")
+            c = f"Dorsal_{int(P['dorsal']):02d}{eq}" + (f"_{limpiar_nombre(nombre)}" if nombre else "")
         else:
             n_anon[P["equipo"]] += 1
-            c = f"Jugador_{n_anon[P['equipo']]:02d}_{limpiar_nombre(P['equipo'])}"
+            c = f"Jugador_{n_anon[P['equipo']]:02d}{eq}"
         base, k = c, 2
         while c in usadas:
             c = f"{base}_{k}"

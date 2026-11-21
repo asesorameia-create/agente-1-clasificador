@@ -541,13 +541,14 @@ async def corregir_carpeta(request: Request):
     carpeta = str(d.get("carpeta", ""))
     dorsal = re.sub(r"\D", "", str(d.get("dorsal", "")))[:2]
     nombre = identidad.limpiar_nombre(str(d.get("nombre", "")))
-    equipo = identidad.limpiar_nombre(str(d.get("equipo", ""))) or "Sin_Equipo"
+    equipo = identidad.limpiar_nombre(str(d.get("equipo", "")))
+    eq = f"_{equipo}" if equipo else ""          # sin equipo: la carpeta no lleva sufijo inventado
     if not carpeta or carpeta == GENERAL:
         return JSONResponse({"error": "Carpeta invalida"}, status_code=400)
     if dorsal and int(dorsal) > 0:
-        nueva = f"Dorsal_{int(dorsal):02d}_{equipo}" + (f"_{nombre}" if nombre else "")
+        nueva = f"Dorsal_{int(dorsal):02d}{eq}" + (f"_{nombre}" if nombre else "")
     elif nombre:
-        nueva = f"{nombre}_{equipo}"
+        nueva = f"{nombre}{eq}"
     else:
         return JSONResponse({"error": "Escribe al menos el numero o el nombre"}, status_code=400)
 
@@ -557,9 +558,9 @@ async def corregir_carpeta(request: Request):
         unida = False
         # si ya hay otra ficha con el mismo numero y equipo, es el mismo jugador: se unen en una sola
         if dorsal:
-            pref = f"Dorsal_{int(dorsal):02d}_{equipo}"
+            pref = f"Dorsal_{int(dorsal):02d}{eq}"
             gemela = next((c for c in sorted({k.split("/")[1] for k, _ in ALMACEN.listar(PREF_ORG)})
-                           if c != carpeta and (c == pref or c.startswith(pref + "_"))), None)
+                           if c != carpeta and (c == pref or (equipo and c.startswith(pref + "_")))), None)
             if gemela:
                 _mover_carpeta(carpeta, gemela)
                 detalle.pop(carpeta, None)
@@ -697,9 +698,16 @@ async def upload_and_process(background_tasks: BackgroundTasks, files: List[Uplo
 
         def guardar(nombre=nombre, datos=datos):
             key = nombre
-            if ALMACEN.existe(key):   # mismo nombre de archivo de otra camara en este partido
+            if ALMACEN.existe(key):
                 b, e = os.path.splitext(nombre)
-                i = 2
+                candidatos = [key] + [k for k, _ in ALMACEN.listar(b + "_") if "/" not in k]
+                for k in candidatos:   # la MISMA foto subida dos veces: se ignora (no se duplica)
+                    try:
+                        if ALMACEN.leer(k) == datos:
+                            return None
+                    except Exception:
+                        pass
+                i = 2                 # mismo nombre pero otra foto (otra camara): se renombra
                 while ALMACEN.existe(f"{b}_{i}{e}"):
                     i += 1
                 key = f"{b}_{i}{e}"
@@ -711,6 +719,9 @@ async def upload_and_process(background_tasks: BackgroundTasks, files: List[Uplo
             return key
 
         key = await run_in_threadpool(guardar)
+        if key is None:
+            datos = None
+            continue                  # foto repetida: ya esta en la sesion
         _encolar(key, datos, sid)     # el analisis empieza ya, mientras siguen llegando fotos
         datos = None
         count += 1
@@ -727,8 +738,11 @@ def _armar_zip(prefijo: str, renombrar) -> str:
     fd, ruta = tempfile.mkstemp(suffix=".zip")
     os.close(fd)
     with zipfile.ZipFile(ruta, "w", zipfile.ZIP_STORED, allowZip64=True) as zf:   # JPG ya va comprimido
+        ahora = time.localtime()[:6]          # fecha real (sin esto Windows muestra 1899/1980)
         for key, _ in ALMACEN.listar(prefijo):
-            with zf.open(renombrar(key), "w", force_zip64=True) as dst:
+            info = zipfile.ZipInfo(renombrar(key), date_time=ahora)
+            info.compress_type = zipfile.ZIP_STORED
+            with zf.open(info, "w", force_zip64=True) as dst:
                 ALMACEN.descargar_a(key, dst)
     return ruta
 

@@ -377,6 +377,57 @@ def _miniatura(img: np.ndarray, x1, y1, x2, y2, lado=160) -> bytes:
     return buf.tobytes() if ok else b""
 
 
+FLORENCE_MAX_PERSONAS = int(os.getenv("FLORENCE_MAX_PERSONAS", "3"))
+FLORENCE_ALTURA_MIN = 0.22
+
+
+def _votar_florence(jugadores: List[Dict[str, Any]], torsos: List[np.ndarray]) -> None:
+    """Jurado de lectores: lector rapido (CRNN) + Florence-2. Reglas medidas con fotos reales:
+    - coinciden -> numero seguro; desacuerdo -> ninguno;
+    - un solo lector: se acepta solo si son 2 cifras vistas de espaldas (las lecturas parciales son de 1 cifra);
+    - dos numeros o dos equipos en el mismo recorte (se colo otro jugador) -> no se asigna."""
+    try:
+        import lector_florence
+        import identidad
+    except Exception:
+        return
+    if not lector_florence.disponible():
+        return
+    for i, j in enumerate(jugadores[:FLORENCE_MAX_PERSONAS]):
+        if i >= len(torsos) or j["altura"] < FLORENCE_ALTURA_MIN:
+            continue
+        local, conf = j.get("dorsal"), j.get("conf_dorsal", 0.0)
+        if local and conf >= 0.97:
+            continue                      # el lector rapido ya esta seguro
+        r = lector_florence.leer(torsos[i])
+        if r is None:
+            continue
+        nums = list(dict.fromkeys(r["numeros"]))
+        equipos = identidad.equipos_en_texto(r["texto"])
+        j["texto_florence"] = r["texto"][:80]
+        if len(equipos) == 1:
+            j["equipo_vision"] = next(iter(equipos))
+        ambiguo = len(nums) > 1 or len(equipos) > 1
+        if ambiguo or not nums:
+            if local and conf < 0.97:     # nadie confirma la lectura dudosa: se descarta
+                j["lecturas_debiles"] = [local] + nums
+                j["dorsal"], j["conf_dorsal"] = None, 0.0
+                j.pop("firma_numero", None)
+            continue
+        f = nums[0]
+        if local == f:
+            j["dorsal"], j["conf_dorsal"], j["fuente_dorsal"] = f, 0.99, "votacion"   # 2 votos
+        elif local:
+            j["lecturas_debiles"] = [local, f]                                         # desacuerdo
+            j["dorsal"], j["conf_dorsal"] = None, 0.0
+            j.pop("firma_numero", None)
+        else:
+            de_espaldas = j.get("huella") is None
+            j["dorsal"], j["fuente_dorsal"] = f, "florence"
+            j["conf_dorsal"] = 0.97 if (len(f) == 2 and de_espaldas) else 0.93
+            j["alto_dorsal"] = max(j.get("alto_dorsal", 0.0), 0.09)
+
+
 def _fusionar_vision(jugadores: List[Dict[str, Any]], torsos: List[np.ndarray]) -> None:
     """Combina el lector local con la lectura de Claude (si esta disponible) sobre los protagonistas."""
     try:
@@ -562,6 +613,7 @@ def analizar_foto(img_bytes: bytes, nombre: str = "") -> Dict[str, Any]:
             top = max(y1, min(top, y1 + int(0.4 * ph)))
             torsos_vision.append(img[top:max(top + 1, y2 - int(0.08 * ph)), max(0, x1 - pad):min(W, x2 + pad)].copy())
             res["jugadores"].append(jug)
+        _votar_florence(res["jugadores"], torsos_vision)
         _fusionar_vision(res["jugadores"], torsos_vision)
         # un mismo numero fisico no puede pertenecer a dos personas solapadas de la foto
         js = [j for j in res["jugadores"] if j.get("_num_xy")]
