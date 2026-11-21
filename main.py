@@ -722,21 +722,24 @@ def get_backup_photo(filename: str):
 
 
 def _autorreparar():
-    """Si el servidor se reinicio a mitad de un partido, retoma SOLO (sin que el fotografo toque nada).
-    Espera mas que el latido maximo: asi nunca compite con una copia vieja que siga viva durante un despliegue."""
-    time.sleep(LATIDO_MAX_SEG + 15)
-    try:
-        if processing_status["is_processing"] or not ALMACEN:
-            return
-        c = _estado_compartido() or {}
-        if c.get("is_processing") and time.time() - c.get("actualizado", 0) > LATIDO_MAX_SEG:
-            logger.warning("Analisis interrumpido detectado: se retoma automaticamente")
-            processing_status["is_processing"] = True
-            processing_status["nomina"] = c.get("nomina", "")
-            _publicar_estado(forzar=True)
-            process_photos_task(c.get("nomina", ""))
-    except Exception:
-        logger.exception("No se pudo retomar automaticamente")
+    """VIGILANTE PERMANENTE: cada 30 s mira si un partido quedo huerfano (el proceso que trabajaba dejo de latir:
+    reinicio, despliegue, caida) y lo retoma SOLO, sin que el fotografo toque nada. Lo ya analizado no se repite.
+    Medido en vivo: en un despliegue Render apago la copia vieja en la foto 56/61 y nadie lo retomo
+    (antes solo se revisaba una vez al arrancar)."""
+    time.sleep(20)
+    while True:
+        try:
+            if not processing_status["is_processing"] and ALMACEN:
+                c = _estado_compartido() or {}
+                if c.get("is_processing") and time.time() - c.get("actualizado", 0) > LATIDO_MAX_SEG:
+                    logger.warning("Partido huerfano detectado (%s): se retoma automaticamente", c.get("current_action"))
+                    processing_status["is_processing"] = True
+                    processing_status["nomina"] = c.get("nomina", "")
+                    _publicar_estado(forzar=True)
+                    process_photos_task(c.get("nomina", ""))
+        except Exception:
+            logger.exception("Vigilante: no se pudo retomar")
+        time.sleep(30)
 
 
 @app.on_event("startup")
