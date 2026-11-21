@@ -700,8 +700,9 @@ def get_backup_vault():
     if not ALMACEN:
         return {"backup_photos": [], "count": 0}
     try:
-        files = [os.path.basename(k) for k, _ in ALMACEN.listar(PREF_BOVEDA)]
-        return {"backup_photos": files, "count": len(files)}
+        files = sorted((os.path.basename(k) for k, _ in ALMACEN.listar(PREF_BOVEDA)), reverse=True)
+        # la boveda crece partido tras partido: a la pagina solo viajan las 200 mas recientes (y el total)
+        return {"backup_photos": files[:200], "count": len(files)}
     except Exception:
         return {"backup_photos": [], "count": 0}
 
@@ -770,18 +771,23 @@ def clean_previous_session():
 
 @app.post("/api/subir-y-procesar")
 async def upload_and_process(background_tasks: BackgroundTasks, files: List[UploadFile] = File(...),
-                             limpiar: int = 1, procesar: int = 1, nomina: str = Form("")):
+                             limpiar: int = 1, procesar: int = 1, nomina: str = Form(""), subida: str = ""):
     """Recibe fotos. La pantalla nueva las manda por tandas (limpiar=1 solo en la primera, procesar=0)
     y al final llama a /api/procesar. Llamado sin parametros se comporta como antes: limpia, sube y procesa."""
     if not ALMACEN:
         return JSONResponse({"error": "R2 no conectado."}, status_code=500)
     if limpiar:
-        if processing_status["is_processing"] or (await run_in_threadpool(_estado_vigente)).get("is_processing"):
+        vig = await run_in_threadpool(_estado_vigente)
+        if processing_status["is_processing"] or vig.get("is_processing"):
             return JSONResponse({"error": "Hay un proceso en marcha"}, status_code=409)
+        # otra subida en curso (otro celular/computadora): no se borra el partido que alguien esta subiendo
+        if vig.get("fase") == "subiendo" and time.time() - vig.get("actualizado", 0) < 60                 and vig.get("subida") and vig.get("subida") != subida:
+            return JSONResponse({"error": "Otra persona está subiendo fotos en este momento"}, status_code=409)
         await run_in_threadpool(_limpiar_sesion, True)
         processing_status["inicio"] = time.time()
     sid = await run_in_threadpool(_id_sesion)
     processing_status["fase"] = "subiendo"
+    processing_status["subida"] = subida or processing_status.get("subida") or ""
     count = 0
     for file in files:
         if not file.filename:
@@ -807,6 +813,11 @@ async def upload_and_process(background_tasks: BackgroundTasks, files: List[Uplo
             ALMACEN.subir(key, datos)
             bkey = PREF_BOVEDA + key
             if ALMACEN.existe(bkey):
+                try:
+                    if ALMACEN.leer(bkey) == datos:
+                        return key        # esa misma foto ya esta respaldada: la boveda no se llena de copias
+                except Exception:
+                    pass
                 bkey = PREF_BOVEDA + time.strftime("%Y%m%d-%H%M%S_") + key
             ALMACEN.copiar(key, bkey)
             return key
@@ -851,20 +862,36 @@ def _ruta_equipo() -> Dict[str, str]:
     rutas = {}
     for c, d in det.items():
         g = identidad.limpiar_nombre(str(d.get("grupo") or d.get("equipo") or ""))
-        rutas[c] = (g if g.startswith("Equipo_") else f"Equipo_{g}") if g else "Otros_jugadores"
+        if not g or g == identidad.OTROS:
+            rutas[c] = identidad.OTROS
+        else:
+            rutas[c] = g if g.startswith("Equipo_") else f"Equipo_{g}"
     return rutas
 
 
 def _en_equipo(rutas: Dict[str, str], carpeta: str) -> str:
     if carpeta == GENERAL:
         return carpeta
-    eq = rutas.get(carpeta, "Otros_jugadores")
+    eq = rutas.get(carpeta, identidad.OTROS)
     corto = carpeta
     for suf in (f"_{eq}", f"_{eq[len('Equipo_'):]}" if eq.startswith("Equipo_") else None):
         if suf and corto.endswith(suf) and len(corto) > len(suf):
             corto = corto[:-len(suf)]          # dentro de 'Equipo_Caracas' basta 'Dorsal_08'
             break
     return f"{eq}/{corto}"
+
+
+def _destinos_zip(rutas: Dict[str, str]) -> Dict[str, str]:
+    """Ruta final de cada carpeta en el ZIP. Candado: dos carpetas distintas NUNCA caen en la misma ruta."""
+    destino: Dict[str, str] = {}
+    usadas: set = set()
+    for c in sorted({k[len(PREF_ORG):].split("/")[0] for k, _ in ALMACEN.listar(PREF_ORG)}):
+        r = _en_equipo(rutas, c)
+        if r in usadas:
+            r = f"{rutas.get(c, identidad.OTROS)}/{c}" if c != GENERAL else c
+        usadas.add(r)
+        destino[c] = r
+    return destino
 
 
 def _tarjetas_a_jpg(tarjetas: List[np.ndarray]) -> Optional[bytes]:
@@ -883,6 +910,7 @@ def _fichas_visuales() -> List[tuple]:
     """Para no abrir carpeta por carpeta: '00_ROSTRO.jpg' dentro de cada carpeta de jugador (Windows la muestra
     en el icono de la carpeta), un indice de caras por equipo y uno general con el nombre de cada carpeta."""
     rutas = _ruta_equipo()
+    destino = _destinos_zip(rutas)
     carpetas = sorted({k.split("/")[1] for k, _ in ALMACEN.listar(PREF_ORG) if k.count("/") >= 2})
     extras, todas = [], []
     por_equipo: Dict[str, List[np.ndarray]] = defaultdict(list)
@@ -893,7 +921,7 @@ def _fichas_visuales() -> List[tuple]:
             jpg = ALMACEN.leer(f"{PREF_MINI}{c}.jpg")
         except Exception:
             continue
-        extras.append((f"{_en_equipo(rutas, c)}/00_ROSTRO.jpg", jpg))
+        extras.append((f"{destino.get(c, _en_equipo(rutas, c))}/00_ROSTRO.jpg", jpg))
         img = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
         if img is None:
             continue
@@ -905,7 +933,7 @@ def _fichas_visuales() -> List[tuple]:
             cv2.putText(t, etiqueta[20:40], (6, 259), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (170, 170, 170), 1, cv2.LINE_AA)
         t = cv2.copyMakeBorder(t, 6, 6, 6, 6, cv2.BORDER_CONSTANT, value=(11, 5, 4))
         todas.append(t)
-        por_equipo[rutas.get(c, "Otros_jugadores")].append(t)
+        por_equipo[rutas.get(c, identidad.OTROS)].append(t)
     for eq, ts in por_equipo.items():
         jpg = _tarjetas_a_jpg(ts)
         if jpg:
@@ -929,10 +957,12 @@ def download_all_zip():
         extras = []
     rutas = _ruta_equipo()
 
+    destino = _destinos_zip(rutas)
+
     def renombrar(k: str) -> str:
         rel = k[len(PREF_ORG):]
         carpeta, _, archivo = rel.partition("/")
-        return f"{_en_equipo(rutas, carpeta)}/{archivo}"
+        return f"{destino.get(carpeta, _en_equipo(rutas, carpeta))}/{archivo}"
 
     ruta = _armar_zip(PREF_ORG, renombrar, extras)
     logger.info("ZIP generado: %s bytes", os.path.getsize(ruta))

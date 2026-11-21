@@ -46,6 +46,7 @@ DIST_FIRMA_DISTINTA = 25.0  # cifra claramente de otro color (Delta E): mismo nu
 SIM_CARAS_DISTINTAS = 0.30  # por debajo, dos rostros son de personas distintas (SFace)
 CARA_SUELTO = 0.40          # calidad minima de cara para dar carpeta a quien sale una sola vez
 DIST_EQUIPO_GRUPO = 0.40    # camisetas del mismo equipo dentro del partido
+OTROS = "Otros_jugadores"    # arqueros, sueltos y equipos con menos de 3 jugadores: una sola carpeta
 SIM_SEGURA = 0.56           # coseno SFace "misma persona sin duda" (margen sobre FAR 1e-5 = 0.472 en LFW)
 DORSAL_SEGURO = 0.97        # lectura de dorsal practicamente sin ambiguedad
 RAFAGA_SEGURA = 0.88        # foto vecina casi identica
@@ -294,7 +295,12 @@ def _agrupar_equipos(jugadores: List[Dict[str, Any]]) -> None:
         else:
             mejor[1].append(P)
             mejor[0] = np.mean([np.asarray(x["color"], dtype=np.float32) for x in mejor[1]], axis=0)
-    centros.sort(key=lambda c: -len(c[1]))     # todo jugador fijo tiene equipo (aunque su equipo salga poco)
+    centros.sort(key=lambda c: -len(c[1]))
+    # MENOS ES MAS: un "equipo" de 1-2 personas (arqueros, arbitro, sueltos) no merece carpeta propia
+    for c in [c for c in centros if len(c[1]) < 3]:
+        for P in c[1]:
+            P["grupo"] = OTROS
+    centros = [c for c in centros if len(c[1]) >= 3]
     usados, letra = set(), 0
     for c in centros:
         nombres = Counter(P["equipo"] for P in c[1] if P["equipo"])
@@ -306,13 +312,20 @@ def _agrupar_equipos(jugadores: List[Dict[str, Any]]) -> None:
         c.append(nombre)
         for P in c[1]:
             P["grupo"] = nombre
-    grandes = [c for c in centros if len(c[1]) >= 2]   # un 'suelto' solo entra a un equipo con 2+ jugadores
     for P in jugadores:
-        if P.get("grupo") or P["color"] is None or not grandes:
+        if P.get("grupo") or P["color"] is None or not centros:
             continue
-        d, c = min(((_dist_color(P["color"], c[0]), c) for c in grandes), key=lambda x: x[0])
-        if d <= (DIST_EQUIPO_GRUPO - 0.05 if P.get("suelto") else DIST_EQUIPO_GRUPO):
+        d, c = min(((_dist_color(P["color"], c[0]), c) for c in centros), key=lambda x: x[0])
+        if P.get("suelto"):
+            # quien sale una sola vez solo es jugador si en ESA foto aparece junto a jugadores de su equipo
+            # (foto de grupo, jugada). Gradas, publico y tecnicos solos no reciben carpeta.
+            fotos_eq = {f for x in c[1] for f in x["fotos"]}
+            if d <= DIST_EQUIPO_GRUPO - 0.05 and set(P["fotos"]) & fotos_eq:
+                P["grupo"] = c[2]
+        elif d <= DIST_EQUIPO_GRUPO:
             P["grupo"] = c[2]
+        else:
+            P["grupo"] = OTROS
 
 
 def clasificar_lote(analisis: List[Dict[str, Any]], nomina: str = "") -> Dict[str, Any]:
@@ -576,13 +589,14 @@ def clasificar_lote(analisis: List[Dict[str, Any]], nomina: str = "") -> Dict[st
     dudas_salida: List[Dict[str, Any]] = []
     for P in sorted(jugadores, key=lambda x: (x["equipo"], x["dorsal"] is None, int(x["dorsal"] or 0), -x["n"])):
         nombre = None
-        eq = f"_{limpiar_nombre(P['equipo'])}" if P["equipo"] else ""    # sin equipo leido: sin sufijo
+        etiqueta = P["equipo"] or (P.get("grupo") if P.get("grupo") != OTROS else "") or ""
+        eq = f"_{limpiar_nombre(etiqueta)}" if etiqueta else ""    # el nombre dice el equipo: nunca dos iguales
         if P["dorsal"]:
             nombre = nombre_de(P["equipo"], P["dorsal"])
             c = f"Dorsal_{int(P['dorsal']):02d}{eq}" + (f"_{limpiar_nombre(nombre)}" if nombre else "")
         else:
-            n_anon[P["equipo"]] += 1
-            c = f"Jugador_{n_anon[P['equipo']]:02d}{eq}"
+            n_anon[eq] += 1
+            c = f"Jugador_{n_anon[eq]:02d}{eq}"
         base, k = c, 2
         if c in usadas and P.get("grupo") and not P["equipo"]:
             c = f"{base}_{limpiar_nombre(P['grupo'])}"      # dos #8 de equipos distintos: lo dice el nombre

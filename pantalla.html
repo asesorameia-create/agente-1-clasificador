@@ -243,7 +243,7 @@ function subirLote(lote, primero) {
     const fd = new FormData();
     lote.forEach(f => fd.append("files", f, f.name));
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", `/api/subir-y-procesar?limpiar=${primero ? 1 : 0}&procesar=0`);
+    xhr.open("POST", `/api/subir-y-procesar?limpiar=${primero ? 1 : 0}&procesar=0&subida=${idSubida}`);
     xhr.upload.onprogress = e => { if (e.lengthComputable) subirLote.parcial = e.loaded; };
     xhr.onload = () => (xhr.status >= 200 && xhr.status < 300) ? ok(JSON.parse(xhr.responseText)) : mal(new Error(xhr.responseText || xhr.status));
     xhr.onerror = () => mal(new Error("Sin conexión"));
@@ -251,6 +251,7 @@ function subirLote(lote, primero) {
   });
 }
 
+let idSubida = Math.random().toString(36).slice(2, 12);
 async function organizar() {
   if (!seleccion.length) return;
   if (!$("chkPermiso").checked) { aviso("Marca la casilla de permiso para continuar"); return; }
@@ -307,7 +308,11 @@ async function leerEstado() {
   try {
     const d = await (await fetch("/api/estado")).json();
     const subiendo = $("btnSubir").disabled && $("cardSubir").style.display !== "none";
-    if (d.fase === "analizando") {
+    if (d.fase === "subiendo" && !subiendo) {
+      $("cardEstado").style.display = "block"; $("cardSubir").style.display = "none";
+      $("estadoTitulo").textContent = `📤 Recibiendo fotos de otro dispositivo: ${d.total_photos || 0} hasta ahora`;
+      $("estadoDetalle").textContent = "Cuando termine la subida verás el avance aquí.";
+    } else if (d.fase === "analizando") {
       $("cardEstado").style.display = "block";
       const p = d.total_photos ? d.processed_photos / d.total_photos : 0;
       $("estadoTitulo").textContent = `🔍 Reconociendo rostros y dorsales: ${d.processed_photos} de ${d.total_photos} fotos`;
@@ -635,7 +640,8 @@ async function abrirRescate() {
   refrescarBoveda();
   try {
     const d = await (await fetch("/api/estado")).json();
-    if (d.is_processing || d.fase === "analizando" || d.fase === "carpetas") { $("cardEstado").style.display = "block"; $("cardSubir").style.display = "none"; sondear(true); }
+    const subiendoOtro = d.fase === "subiendo" && (Date.now() / 1000 - (d.actualizado || 0)) < 60;
+    if (d.is_processing || d.fase === "analizando" || d.fase === "carpetas" || subiendoOtro) { $("cardEstado").style.display = "block"; $("cardSubir").style.display = "none"; sondear(true); }
     else if (d.fase === "interrumpido" || d.fase === "error") { $("cardSubir").style.display = "none"; leerEstado(); cargarResultados(d); }
     else cargarResultados(d);
   } catch (e) {}
