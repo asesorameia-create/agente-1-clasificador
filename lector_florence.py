@@ -77,6 +77,13 @@ def leer(bgr: np.ndarray) -> Optional[Dict[str, Any]]:
                 out = model.generate(input_ids=inp["input_ids"], pixel_values=inp["pixel_values"],
                                      max_new_tokens=24, num_beams=1, do_sample=False)
             texto = proc.batch_decode(out, skip_special_tokens=True)[0].strip()
+            try:
+                with open("/proc/self/status") as f_:
+                    m_ = {l.split(":")[0]: int(l.split()[1]) // 1024 for l in f_ if l.startswith(("VmRSS", "VmHWM"))}
+                logger.info("MEM florence torso=%dx%d rss=%dMB maximo=%dMB", bgr.shape[1], bgr.shape[0],
+                            m_.get("VmRSS", 0), m_.get("VmHWM", 0))
+            except Exception:
+                pass
         except Exception as e:
             logger.warning("Florence-2 fallo en un torso: %s", e)
             return None

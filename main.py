@@ -161,11 +161,12 @@ except Exception:
     _libc = None
 
 
-def _memoria_mb() -> int:
+def _memoria_mb(campo: str = "VmRSS") -> int:
+    """VmRSS = memoria actual; VmHWM = el maximo alcanzado desde que arranco el servidor."""
     try:
         with open("/proc/self/status") as f:
             for linea in f:
-                if linea.startswith("VmRSS:"):
+                if linea.startswith(campo + ":"):
                     return int(linea.split()[1]) // 1024
     except Exception:
         pass
@@ -196,7 +197,11 @@ def _analizar(key: str, datos: Optional[bytes], sid: str) -> Dict[str, Any]:
     try:
         if datos is None:
             datos = ALMACEN.leer(key)
+        m0, t0 = _memoria_mb(), time.time()
         a = motor.analizar_foto(datos, os.path.basename(key))
+        logger.info("MEM foto=%s personas=%d antes=%dMB despues=%dMB maximo_historico=%dMB %.1fs",
+                    os.path.basename(key), len(a.get("jugadores", [])), m0, _memoria_mb(), _memoria_mb("VmHWM"),
+                    time.time() - t0)
     except Exception as e:
         logger.exception("No se pudo analizar %s: %s", key, e)
         a = {"nombre": os.path.basename(key), "hora": None, "jugadores": [], "firma": None, "ok": False}
@@ -418,7 +423,7 @@ def diagnostico():
             "cpus": CPUS, "hilos_analisis": HILOS, "opencv": cv2.__version__, "version": app.version,
             "florence": os.getenv("LECTOR_FLORENCE", "1") != "0",
             "huellas_guardadas": len(ALMACEN.listar(PREF_ANALISIS)) if ALMACEN else None,
-            "memoria_mb": _memoria_mb(), "memoria_limite_mb": MEMORIA_LIMITE_MB}
+            "memoria_mb": _memoria_mb(), "memoria_maxima_mb": _memoria_mb("VmHWM"), "memoria_limite_mb": MEMORIA_LIMITE_MB}
 
 
 @app.get("/logo.png")
