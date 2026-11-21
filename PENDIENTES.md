@@ -103,3 +103,12 @@ Pasos siguientes, en orden:
 ## Pruebas locales (scratchpad de la sesión; se puede rehacer)
 - `fotos-cliente-real\` (20 fotos del cliente bajadas de la bóveda).
 - Entorno: Python 3.14 + opencv-python-headless 4.11.0.86 (igual que Render), torch 2.15 CPU, transformers 5.23.
+
+## NUEVO RUMBO (21 nov 2026, decisión del usuario)
+- NO habrá nómina y el fotógrafo NO escribirá números: no conoce a los jugadores. Vende cuando el jugador
+  se ve en Instagram y lo contacta.
+- Idea a construir: página pública "BÚSCATE" por partido: el jugador o su padre escribe su número o se hace
+  una selfie -> ve sus fotos con marca de agua -> le escribe al fotógrafo para comprar. La selfie se usa una
+  vez y se borra (consentimiento de quien busca). Las carpetas no necesitan nombre: el comprador se identifica.
+- Lectores a probar (licencia comercial por VERIFICAR): SmolVLM-500M / SmolVLM2, Moondream2, Florence-2-large;
+  votación de SmolVLM sobre varios recortes de la misma persona.
