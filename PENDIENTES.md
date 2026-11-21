@@ -21,6 +21,21 @@ Pídele a Claude: "Lee PENDIENTES.md del agente1-clasificador y continúa desde 
   exp_rapid2.py). Son lectores de texto: ignoran un número grande y decorado.
 - En prueba: SmolVLM-256M-Instruct (Apache 2.0) preguntando "¿qué número tiene la camiseta?" (exp_smol.py).
 
+### HALLAZGO 21 nov 08:30: SmolVLM-256M-Instruct (Apache 2.0) LEE LOS NUMEROS DIFICILES
+- Pregunta: "What is the jersey number of the player? Answer only with the number, or none."
+- Sobre el recorte "torso" (mitad superior del cuerpo sin cabeza) acertó 6/6: 4 Caracas, 6 Apure,
+  8 La Guaira, 3 / 6 / 10 Trujillo (Florence-2 y PP-OCR: 0/6). Script: scratchpad/exp_smol.py.
+- Problema: ~55 s por recorte en el PC (con división de imagen activada y otros procesos).
+  Probar do_image_splitting=False + imagen 384-512 px; meta < 5 s por recorte en Render.
+- Falta: medir que responda "none" en recortes SIN número (público, de frente sin número) -> no inventar.
+- Integrar como 3er votante: CRNN + Florence + SmolVLM; SmolVLM + otro coinciden = seguro;
+  SmolVLM solo = ¿aceptar? decidir con la medición de falsos positivos en 20 + 40 fotos.
+
+### Prueba de estrés en vivo (21 nov)
+- 1er intento: 60 fotos + 10 usuarios -> Render se cayó: "Ran out of memory (used over 4GB)".
+- Arreglo c038f66: MALLOC_ARENA_MAX=2, malloc_trim tras cada foto, freno si memoria > 3000 MB.
+- Script: scratchpad/estres.py (informe out/estres.html). Re-ejecutar tras cada cambio grande.
+
 ### Siguiente paso
 1. Lector de números que SÍ lea dígitos grandes decorados. Opciones a medir sobre out/tight/*.jpg:
    a) SmolVLM-256M/500M (preguntar el número; desactivar división de imagen para velocidad).
