@@ -127,3 +127,7 @@ Pasos siguientes, en orden:
   Caso trampa real: #8 La Guaira y #8 Carabobo, ambos de blanco (fotos del cliente).
 - Personas de 1 sola foto sin número -> UNA carpeta "Otros_jugadores" con índice de caras (meta: 10-15
   carpetas por partido, no 40). Código: identidad.py sección 1 (unión por dorsal) y sección 6 (nombres).
+- Orden de decisión para mismo número (acordado con el usuario): 1) caras visibles en ambas -> decide la
+  cara (distintas = separar aunque número y uniforme coincidan); 2) cara en una sola -> conectar por foto
+  puente (cara + número) o ráfaga EXIF; 3) sin caras (ambas de espaldas) -> firma de la cifra, texto del
+  equipo, patrocinadores, peinado, medias/zapatos.
